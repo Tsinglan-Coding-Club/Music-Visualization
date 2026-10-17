@@ -16,6 +16,11 @@ Thumbs.db
 *.swp
 *.swo
 tmp/
+logs/
+
+# 本地音乐素材；仓库仅保留放置说明。
+/music/*
+!/music/README.md
 
 # 常见依赖与构建输出
 node_modules/
