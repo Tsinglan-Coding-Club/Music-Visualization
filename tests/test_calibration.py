@@ -78,3 +78,38 @@ class CalibrationTests(unittest.TestCase):
         for time in (math.nan, math.inf, True):
             with self.subTest(time=time), self.assertRaises(ValueError):
                 calibration.add(time)
+
+    def test_average_bpm_is_independent_of_configured_grid(self):
+        for actual_bpm in (60, 105, 180):
+            with self.subTest(actual_bpm=actual_bpm):
+                calibration = BeatCalibrator(90, 4, 0, 35)
+                for index in range(20):
+                    calibration.add(4.115 + index * 60 / actual_bpm)
+                result = calibration.estimate()
+                self.assertAlmostEqual(result.average_bpm, actual_bpm)
+                self.assertEqual(result.tempo_intervals, 19)
+
+    def test_average_bpm_uses_average_interval_and_needs_two_taps(self):
+        calibration = BeatCalibrator(90, 4, 0, 0)
+        self.assertIsNone(calibration.estimate().average_bpm)
+        calibration.add(4)
+        self.assertIsNone(calibration.estimate().average_bpm)
+        for time in (4.5, 5.2, 6.0):
+            calibration.add(time)
+        self.assertAlmostEqual(calibration.estimate().average_bpm, 90)
+        self.assertEqual(calibration.estimate().tempo_intervals, 3)
+
+    def test_tempo_ignores_rapid_duplicates_and_backward_events(self):
+        calibration = BeatCalibrator(90, 4, 0, 0)
+        for time in (4, 4.03, 4 + 2 / 3, 4.5, 4 + 4 / 3):
+            calibration.add(time)
+        self.assertAlmostEqual(calibration.estimate().average_bpm, 90)
+        self.assertEqual(calibration.estimate().tempo_intervals, 2)
+
+    def test_tempo_capture_is_bounded_independently(self):
+        calibration = BeatCalibrator(90, 4, 0, 0)
+        for index in range(100):
+            calibration.add(4 + index * 60 / 105)
+        result = calibration.estimate()
+        self.assertEqual(result.tempo_intervals, 63)
+        self.assertAlmostEqual(result.average_bpm, 105)

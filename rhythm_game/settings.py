@@ -119,7 +119,8 @@ class SettingsPage:
         estimate = self.calibrator.estimate()
         self.app.record("calibration_result", count=estimate.count, used=estimate.used,
                         rejected=estimate.rejected, beat_offset_ms=estimate.offset_ms,
-                        spread_ms=estimate.spread_ms, ready=estimate.ready)
+                        spread_ms=estimate.spread_ms, ready=estimate.ready,
+                        average_bpm=estimate.average_bpm, tempo_intervals=estimate.tempo_intervals)
         self._message(estimate.message if estimate.used >= 8 else "有效拍数不足，请重新校准并至少稳定拍 8 拍。",
                       GREEN if estimate.ready else RED)
 
@@ -245,22 +246,29 @@ class SettingsPage:
         self._button("start", "播放 / 重新校准", (648, 274, 200, 43), self.start_calibration, primary=True)
         self._button("finish", "完成采样", (864, 274, 160, 43), self.finish_calibration, enabled=self.calibrating)
         estimate = self.calibrator.estimate() if self.calibrator is not None else None
-        w._card((648, 338, 568, 168), (28, 36, 51), 12)
+        w._card((648, 338, 568, 184), (28, 36, 51), 12)
         heading = "正在听音乐采样…" if self.calibrating else "校准结果预览" if estimate else "等待开始校准"
         w._text("calibration-heading", heading, 668, 354, 22, PURPLE if self.calibrating else GREEN)
-        numbers = f"采集 {estimate.count} 拍 · 稳定 {estimate.used} 拍 · 忽略 {estimate.rejected} 次" if estimate else "跟拍只用于估计拍点偏移，不参与游戏成绩"
-        w._text("calibration-count", numbers, 668, 395, 15, MUTED)
+        numbers = f"首拍样本 {estimate.count} 拍 · 稳定 {estimate.used} 拍 · 忽略 {estimate.rejected} 次" if estimate else "跟拍只用于估计拍点偏移，不参与游戏成绩"
+        w._text("calibration-count", numbers, 668, 390, 15, MUTED)
+        configured_bpm = self.app.config.bpm
+        if estimate is not None and estimate.average_bpm is not None:
+            bpm_text = f"平均跟拍 {estimate.average_bpm:.1f} BPM · 设定 {configured_bpm:g} · 差 {estimate.average_bpm - configured_bpm:+.1f}"
+        else:
+            bpm_text = f"平均跟拍 — BPM · 设定 {configured_bpm:g}（至少打 2 拍）"
+        w._text("calibration-bpm", bpm_text, 668, 421, 18, GREEN, max_width=528)
         result = f"建议偏移 {estimate.offset_ms:+.2f} ms · 首拍 {estimate.first_beat_seconds:.3f}s" if estimate and estimate.count else "首拍位置与输入补偿将分开保存"
-        w._text("calibration-result", result, 668, 432, 17, TEXT, max_width=528)
+        w._text("calibration-result", result, 668, 455, 17, TEXT, max_width=528)
         spread = f"稳定拍的 90% 离散范围：±{estimate.spread_ms:.1f} ms" if estimate and estimate.count else "听到音乐后按空格；不需要跟随屏幕拍点"
-        w._text("calibration-spread", spread, 668, 471, 14, MUTED)
+        w._text("calibration-spread", spread, 668, 490, 14, MUTED)
         for index, line in enumerate(textwrap.wrap(self.status, width=32)[:2]):
-            w._text(("calibration-status", index), line, 648, 527 + index * 24, 15, self.status_color, max_width=568)
+            w._text(("calibration-status", index), line, 648, 539 + index * 23, 14, self.status_color, max_width=568)
         self._button("use", "使用建议偏移（待保存）", (648, 591, 280, 43), self.use_estimate,
                      enabled=estimate is not None and estimate.ready and not self.calibrating)
         for index, line in enumerate(("只微调当前首拍附近的相位；整拍或小节错位请手动调整。",
                                       "校准使用左侧输入补偿；结果包含个人跟拍习惯。",
+                                      "平均 BPM 来自实际跟拍间隔，漏拍／多拍会影响结果。",
                                       f"不自动识别硬件延迟，也不改变 {self.app.config.bpm:g} BPM 的固定速度。")):
-            w._text(("calibration-scope", index), line, 648, 653 + index * 23, 13, MUTED, max_width=568)
+            w._text(("calibration-scope", index), line, 648, 644 + index * 21, 12, MUTED, max_width=568)
         self._button("save", "保存并应用", (40, 747, 190, 45), self.save, primary=True, enabled=not self.calibrating)
         w._text("settings-footer", "Tab 切换数值 · ↑↓ 微调 · Esc 放弃修改返回 · 保存后音乐停止", 254, 760, 14, MUTED)

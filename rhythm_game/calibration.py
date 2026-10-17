@@ -15,6 +15,8 @@ class CalibrationEstimate:
     spread_ms: float
     ready: bool
     message: str
+    average_bpm: float | None = None
+    tempo_intervals: int = 0
 
 
 class BeatCalibrator:
@@ -38,6 +40,7 @@ class BeatCalibrator:
         self.center = current_offset_ms / 1000
         self.input_offset = input_offset_ms / 1000
         self.samples = []
+        self._tempo_times = []
         self.rejected = 0
         self._last_time = None
         self._last_index = None
@@ -49,6 +52,12 @@ class BeatCalibrator:
         if isinstance(music_time, bool) or not isinstance(music_time, (int, float)) or not math.isfinite(music_time):
             raise ValueError("拍掌时间必须是有限数字")
         corrected = music_time - self.input_offset
+        # BPM 独立使用实际输入间隔；不能用配置速度吸附或补齐漏拍，
+        # 否则速度设置错误时仍可能显示接近原设定的结果。
+        if music_time >= 0 and (not self._tempo_times or music_time - self._tempo_times[-1] >= 0.10):
+            self._tempo_times.append(music_time)
+            if len(self._tempo_times) > self.maximum_samples:
+                self._tempo_times.pop(0)
         index = math.floor((corrected - self.base - self.center) / self.period + 0.5)
         if (index < 0 or self._last_time is not None and corrected - self._last_time < self.period * 0.35
                 or self._last_index is not None and index <= self._last_index):
@@ -61,9 +70,13 @@ class BeatCalibrator:
         return True
 
     def estimate(self):
+        intervals = max(0, len(self._tempo_times) - 1)
+        average_bpm = (60 * intervals / (self._tempo_times[-1] - self._tempo_times[0])
+                       if intervals else None)
         if not self.samples:
             return CalibrationEstimate(0, 0, self.rejected, self.center * 1000,
-                                       self.base + self.center, 0, False, "请听音乐，每一拍按一次空格")
+                                       self.base + self.center, 0, False, "请听音乐，每一拍按一次空格",
+                                       average_bpm, intervals)
         # 先在圆周上寻找稳健中心，再展开；避免 ±半拍附近的值直接平均为零。
         seed = min(self.samples, key=lambda candidate: median(abs(self._wrap(v - candidate)) for v in self.samples))
         unwrapped = [seed + self._wrap(value - seed) for value in self.samples]
@@ -72,6 +85,10 @@ class BeatCalibrator:
         mad = median(deviations)
         cutoff = max(0.040, min(self.period * 0.20, 3 * 1.4826 * mad))
         inliers = [value for value in unwrapped if abs(value - center) <= cutoff]
+        if not inliers:
+            return CalibrationEstimate(len(self.samples), 0, self.rejected + len(self.samples),
+                                       self.center * 1000, self.base + self.center, mad * 1000, False,
+                                       "拍点相位分散，请参考平均跟拍 BPM 检查设定速度", average_bpm, intervals)
         center = median(inliers)
         errors = sorted(abs(value - center) for value in inliers)
         spread = errors[max(0, math.ceil(len(errors) * 0.90) - 1)] * 1000
@@ -89,4 +106,5 @@ class BeatCalibrator:
             message = "结果可预览；加入左侧设置后保存应用"
         return CalibrationEstimate(len(self.samples), len(inliers),
                                    self.rejected + len(self.samples) - len(inliers),
-                                   round(offset * 1000, 2), self.base + offset, spread, ready, message)
+                                   round(offset * 1000, 2), self.base + offset, spread, ready, message,
+                                   average_bpm, intervals)
