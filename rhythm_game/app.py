@@ -6,7 +6,7 @@ from pathlib import Path
 from time import perf_counter
 
 from .audio import AudioEngine
-from .configuration import load_config
+from .configuration import load_config, prepare_config_update, save_config_text
 from .core import RhythmChart, RhythmSession
 
 
@@ -160,35 +160,58 @@ class RhythmApp:
                     status=result.status, error_ms=result.error_ms)
 
     def reload(self):
-        # 先解析和解码，配置不合法时保留当前可运行对象。
         try:
             config = load_config(self.config_path)
+        except Exception as exc:
+            self.message("配置未加载", str(exc), RED)
+            return False
+        return self._activate_config(config)
+
+    def apply_settings(self, updates, expected_text):
+        try:
+            text, config = prepare_config_update(self.config_path, updates, expected_text)
+        except Exception as exc:
+            self.message("设置未保存", str(exc), RED)
+            return False
+        return self._activate_config(config, text, expected_text)
+
+    def _activate_config(self, config, text=None, expected_text=None):
+        # 先验证并解码；设备和保存均成功后才替换当前设置。
+        try:
             replacement = AudioEngine(config)
             chart = make_chart(config, replacement.duration)
         except Exception as exc:
             self.message("配置未加载", str(exc), RED)
-            return
+            return False
         self.stop()
         old_engine = self.engine
-        old_engine.close()
+        try:
+            old_engine.close()
+        except Exception as exc:
+            self.message("音频设备无法停止", str(exc), RED)
+            return False
         try:
             replacement.open()
+            if text is not None:
+                save_config_text(self.config_path, text, expected_text)
         except Exception as exc:
             replacement.close()
             try:
                 old_engine.open()
-            except Exception:
-                raise RuntimeError(f"音频设备无法重新打开：{exc}") from exc
-            self.message("音频设置未应用", str(exc), RED)
-            return
+            except Exception as restore_error:
+                self.message("音频设备无法打开", f"{exc}；恢复失败：{restore_error}", RED)
+                return False
+            self.message("设置未应用", str(exc), RED)
+            return False
         self.engine, self.config, self.chart = replacement, config, chart
         self.session = RhythmSession(chart, config.window_ms, config.input_offset_ms,
                                      lead_in_bars=config.lead_in_bars)
         self.expected_generation = replacement.generation
-        self.message("配置已加载", f"首拍 {chart.start:.3f} 秒；按 Enter 重播", GREEN)
+        self.message("设置已保存" if text is not None else "配置已加载", f"首拍 {chart.start:.3f} 秒；按 Enter 重播", GREEN)
         self.record("reload", bpm=config.bpm, beat_start=chart.start,
                     beat_offset_ms=config.beat_offset_ms, input_offset_ms=config.input_offset_ms,
                     window_ms=config.window_ms, blocksize=config.blocksize)
+        return True
 
 
     def _advance_session(self, music_time):

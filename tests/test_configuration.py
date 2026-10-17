@@ -2,7 +2,7 @@ from pathlib import Path
 import tempfile
 import unittest
 
-from rhythm_game.configuration import load_config
+from rhythm_game.configuration import load_config, prepare_config_update, save_config_text
 from tests.helpers import CONFIG_TEXT, write_config
 
 
@@ -57,6 +57,36 @@ class ConfigTests(unittest.TestCase):
     def test_missing_section_has_clear_error(self):
         with self.assertRaisesRegex(ValueError, r"缺少 \[display\]"):
             load_config(write_config(self.root, CONFIG_TEXT.split("[display]")[0]))
+
+    def test_settings_save_preserves_comments_paths_and_other_fields(self):
+        original = CONFIG_TEXT.replace("beat_offset_ms = 0.0", "beat_offset_ms = 0.0   # 整曲偏移")
+        path = write_config(self.root, original)
+        text, config = prepare_config_update(path, {"beat_offset_ms": 75, "music_volume": 0.25}, original)
+        self.assertIn("beat_offset_ms = 75   # 整曲偏移", text)
+        self.assertEqual(config.music_path, self.root.resolve() / "music.wav")
+        self.assertEqual(config.input_offset_ms, 0)
+        self.assertEqual(path.read_text(), original)
+        save_config_text(path, text, original)
+        self.assertEqual(load_config(path).beat_offset_ms, 75)
+        self.assertEqual(load_config(path).music_volume, 0.25)
+        self.assertFalse(list(self.root.glob(".*.tmp")))
+
+    def test_invalid_or_external_updates_preserve_file(self):
+        path = write_config(self.root)
+        for updates in ({"window_ms": 1000}, {"blocksize": 1.5}, {"music_volume": 2},
+                        {"beat_offset_ms": True}, {"device": 1}):
+            with self.subTest(updates=updates), self.assertRaises(ValueError):
+                prepare_config_update(path, updates, CONFIG_TEXT)
+            self.assertEqual(path.read_text(), CONFIG_TEXT)
+        text, _ = prepare_config_update(path, {"beat_offset_ms": 20}, CONFIG_TEXT)
+        external = CONFIG_TEXT + "\n# 其他人的修改\n"
+        path.write_text(external)
+        with self.assertRaisesRegex(ValueError, "外部修改"):
+            save_config_text(path, text, CONFIG_TEXT)
+        self.assertEqual(path.read_text(), external)
+        with self.assertRaisesRegex(ValueError, "外部修改"):
+            prepare_config_update(path, {"beat_offset_ms": 40}, CONFIG_TEXT)
+        self.assertFalse(list(self.root.glob(".*.tmp")))
 
 
 if __name__ == "__main__":

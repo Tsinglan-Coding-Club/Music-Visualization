@@ -207,6 +207,30 @@ class AppTests(unittest.TestCase):
         self.assertIs(self.app.engine, previous)
         self.assertTrue(self.app.desired_playing)
 
+    def test_settings_apply_updates_disk_and_runtime_together(self):
+        original = self.app.config_path.read_text()
+        self.assertTrue(self.app.apply_settings({"beat_offset_ms": 80, "input_offset_ms": 30}, original))
+        self.assertAlmostEqual(self.app.chart.start, 4.080)
+        self.assertEqual(self.app.session.input_offset_ms, 30)
+        self.assertIn("beat_offset_ms = 80", self.app.config_path.read_text())
+        self.assertFalse(self.app.desired_playing)
+
+    def test_failed_device_or_disk_save_restores_previous_config(self):
+        original = self.app.config_path.read_text()
+        old_engine = self.app.engine
+        replacement = FakeAudio(self.app.config)
+        with patch("rhythm_game.app.AudioEngine", return_value=replacement), patch.object(replacement, "open", side_effect=RuntimeError("device failed")):
+            self.assertFalse(self.app.apply_settings({"blocksize": 64}, original))
+        self.assertIs(self.app.engine, old_engine)
+        self.assertTrue(old_engine.stream.active)
+        self.assertEqual(self.app.config_path.read_text(), original)
+        with patch("rhythm_game.app.save_config_text", side_effect=OSError("disk failed")):
+            self.assertFalse(self.app.apply_settings({"beat_offset_ms": 50}, original))
+        self.assertIs(self.app.engine, old_engine)
+        self.assertTrue(old_engine.stream.active)
+        self.assertEqual(self.app.config.beat_offset_ms, 0)
+        self.assertEqual(self.app.config_path.read_text(), original)
+
     def test_automatic_inputs_keep_known_timestamps_after_visual_stall(self):
         self.app.start()
         self.set_position(5.5, playing=True)

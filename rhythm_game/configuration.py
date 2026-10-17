@@ -2,7 +2,10 @@
 
 from dataclasses import dataclass
 import math
+import os
 from pathlib import Path
+import re
+import tempfile
 import tomllib
 
 
@@ -30,8 +33,12 @@ class Config:
 
 def load_config(path: str | Path) -> Config:
     source = Path(path).resolve()
-    with source.open("rb") as stream:
-        data = tomllib.load(stream)
+    return parse_config_text(source.read_text(encoding="utf-8"), source)
+
+
+def parse_config_text(text: str, source: str | Path) -> Config:
+    source = Path(source).resolve()
+    data = tomllib.loads(text)
     allowed = {
         "music": {"path", "volume"},
         "rhythm": {"bpm", "beat_start_seconds", "beat_offset_ms", "beats_per_bar", "lead_in_bars", "note_values"},
@@ -109,3 +116,71 @@ def load_config(path: str | Path) -> Config:
         number("display", "height", 700, 2160, integer=True),
         number("display", "lookahead_seconds", 0.5, 10),
     )
+
+
+EDITABLE_FIELDS = {
+    "beat_offset_ms": ("rhythm", "beat_offset_ms"),
+    "input_offset_ms": ("judgment", "input_offset_ms"),
+    "window_ms": ("judgment", "window_ms"),
+    "blocksize": ("audio", "blocksize"),
+    "music_volume": ("music", "volume"),
+    "clap_volume": ("audio", "clap_volume"),
+}
+
+
+def prepare_config_update(path, updates, expected_text):
+    """仅改页面负责的数字字段；保留素材、其他配置及行内注释。"""
+    source = Path(path).resolve()
+    original = source.read_text(encoding="utf-8")
+    if original != expected_text:
+        raise ValueError("配置已被外部修改，请返回游戏后重新打开设置")
+    if not updates or updates.keys() - EDITABLE_FIELDS.keys():
+        raise ValueError("设置包含未知或空字段")
+    replacements = {}
+    for name, value in updates.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"{name} 必须是有限数字")
+        if name == "blocksize":
+            if int(value) != value:
+                raise ValueError("音频缓冲必须为整数")
+            value = int(value)
+        replacements[EDITABLE_FIELDS[name]] = str(value)
+    section = None
+    lines = []
+    for line in original.splitlines(keepends=True):
+        header = re.match(r"\s*\[([^\]]+)\]", line)
+        if header:
+            section = header[1]
+        assignment = re.match(r"(\s*)(\w+)(\s*=\s*)([^#\r\n]*)(.*)", line.rstrip("\r\n"))
+        if assignment and (section, assignment[2]) in replacements:
+            value_part = assignment[4]
+            spacing = value_part[len(value_part.rstrip()):]
+            newline = "\n" if line.endswith("\n") else ""
+            line = (assignment[1] + assignment[2] + assignment[3]
+                    + replacements.pop((section, assignment[2])) + spacing + assignment[5] + newline)
+        lines.append(line)
+    if replacements:
+        raise ValueError("配置中缺少待修改字段")
+    updated = "".join(lines)
+    return updated, parse_config_text(updated, source)
+
+
+def save_config_text(path, text, expected_text):
+    """校验并原子替换，失败时不留下部分写入的配置。"""
+    path = Path(path).resolve()
+    parse_config_text(text, path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=f".{path.name}.", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, path.stat().st_mode & 0o777)
+        if path.read_text(encoding="utf-8") != expected_text:
+            raise ValueError("配置已被外部修改，请重新打开设置")
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)

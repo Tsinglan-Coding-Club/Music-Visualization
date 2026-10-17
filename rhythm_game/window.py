@@ -11,6 +11,7 @@ from time import perf_counter
 import arcade
 
 from .app import BG, PANEL, LINE, TEXT, MUTED, GREEN, PURPLE, RED
+from .settings import SettingsPage
 
 
 DESIGN_WIDTH = 1280
@@ -29,6 +30,8 @@ class RhythmWindow(arcade.Window):
         self._texts = {}
         self._text_sources = {}
         self._buttons = []
+        self._settings = None
+        self._settings_button = (862, 30, 150, 40)
         self._camera = None
         self._scale = 1.0
         self._offset_x = 0.0
@@ -213,6 +216,9 @@ class RhythmWindow(arcade.Window):
             return
         self.clear()
         self._camera.use()
+        if self._settings is not None:
+            self._settings.draw()
+            return
         app = self.controller
         cfg = app.config
         reading = app.engine.reading()
@@ -220,6 +226,8 @@ class RhythmWindow(arcade.Window):
         bar = app.chart.bar_at(position)
         self._text("title", "主音归来", 40, 28, 34)
         self._text("subtitle", "节奏练习  /  第 1 阶段", 218, 42, 17, MUTED)
+        self._card(self._settings_button, (35, 44, 62), 9)
+        self._text("settings-entry", "设置 / 校准", 878, 40, 17)
         self._card((1032, 30, 208, 40), (27, 51, 46), 20)
         self._text("input-mode", "自动软件验证" if app.auto_input else "键盘输入 · 手套未接入", 1050, 39, 16, GREEN)
 
@@ -303,8 +311,13 @@ class RhythmWindow(arcade.Window):
         if self._closed_once or symbol in self._held_keys:
             return
         self._held_keys.add(symbol)
+        if self._settings is not None:
+            self._settings.key_press(symbol, modifiers, host_time)
+            return
         app = self.controller
-        if symbol == arcade.key.SPACE:
+        if symbol == arcade.key.F1:
+            self.open_settings()
+        elif symbol == arcade.key.SPACE:
             app.clap(host_time=host_time)
         elif symbol in (arcade.key.ENTER, arcade.key.NUM_ENTER):
             if app.paused:
@@ -324,6 +337,22 @@ class RhythmWindow(arcade.Window):
         elif symbol == arcade.key.ESCAPE:
             self.close()
 
+    def open_settings(self):
+        if self._settings is None and self.controller.reload():
+            self.controller.auto_input = False
+            self._settings = SettingsPage(self)
+
+    def close_settings(self):
+        if self._settings is not None and self._settings.calibrating:
+            self._settings.calibrating = False
+            self.controller.stop()
+            self.controller.record("calibration_cancel")
+        self._settings = None
+
+    def on_text(self, text):
+        if self._settings is not None:
+            self._settings.text(text)
+
     def on_key_release(self, symbol, modifiers):
         self._held_keys.discard(symbol)
 
@@ -335,6 +364,13 @@ class RhythmWindow(arcade.Window):
             return
         design_x = (x - self._offset_x) / self._scale
         design_y = DESIGN_HEIGHT - (y - self._offset_y) / self._scale
+        if self._settings is not None:
+            self._settings.mouse_press(design_x, design_y)
+            return
+        left, top, width, height = self._settings_button
+        if left <= design_x <= left + width and top <= design_y <= top + height:
+            self.open_settings()
+            return
         for (left, top, width, height), label, action, primary in self._buttons:
             if left <= design_x <= left + width and top <= design_y <= top + height:
                 getattr(self.controller, action)()
@@ -344,9 +380,11 @@ class RhythmWindow(arcade.Window):
         if self._closed_once:
             return
         app = self.controller
-        if app.auto_input and app.desired_playing:
+        if self._settings is None and app.auto_input and app.desired_playing:
             app.inject_due_targets()
         app.update()
+        if self._settings is not None:
+            self._settings.update()
         now = perf_counter()
         if now >= self._next_flush:
             app.log.flush()
