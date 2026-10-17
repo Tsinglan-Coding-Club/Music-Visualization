@@ -1,66 +1,58 @@
-import time
-import threading
-import queue
+"""《主音归来》节奏互动第 1 阶段入口。Python 3.11+。"""
 
-BPM = 60
-tDiffer_Beat = 60/BPM
-MaxError = tDiffer_Beat/8
-clap_input = queue.Queue()##以后改成硬件的digital信号输入
-rythem_arr = [4,8,8,4]
-isStart = False
-isCorrect = True
+import argparse
+from pathlib import Path
+import sys
 
-def preInput():
-    while(True):
-        try:
-            clap = input()
-            clap_time = time.perf_counter()
-            clap_input.put((clap_time, clap))
-        except EOFError:
-            break
 
-threading.Thread(target=preInput, daemon=True).start()
-
-def getBeatTime(rythem):
-    temp = (1/rythem)*4
-    tDiffer = temp*tDiffer_Beat
-    return tDiffer
-
-print("Enter R to clap")
-
-i = 0
-last = None         
-while(i<len(rythem_arr)-1):
-
-    clap = None
+def main():
+    parser = argparse.ArgumentParser(description="音乐播放、键盘拍掌与简易节奏判定")
+    parser.add_argument("--config", type=Path, default=Path(__file__).resolve().with_name("config.toml"))
+    parser.add_argument("--list-devices", action="store_true", help="列出音频设备后退出")
+    parser.add_argument("--check", action="store_true", help="验证配置、解码音乐与生成目标，不播放声音")
+    parser.add_argument("--demo-seconds", type=float, help="运行指定秒数的自动软件输入验证，然后退出")
+    parser.add_argument("--screenshot", type=Path, help="自动验证结束时保存画面，配合 --demo-seconds")
+    args = parser.parse_args()
+    if args.demo_seconds is not None and not 0 < args.demo_seconds <= 600:
+        parser.error("--demo-seconds 必须在 0～600 秒之间")
+    if args.screenshot and args.demo_seconds is None:
+        parser.error("--screenshot 需要配合 --demo-seconds")
     try:
-        clap_time,clap = clap_input.get(timeout=0.01)  
-    except queue.Empty:
-        continue
-    
-    if(clap != None):
-        
-        now = clap_time
+        if args.list_devices:
+            import sounddevice
+            print(sounddevice.query_devices())
+            return 0
+        from rhythm_game.configuration import load_config
+        from rhythm_game.audio import AudioEngine
+        from rhythm_game.app import RhythmApp, make_chart
+        if args.check:
+            config = load_config(args.config)
+            engine = AudioEngine(config)
+            chart = make_chart(config, engine.duration)
+            print(f"音乐：{config.music_path.name}，{engine.duration:.3f}s，{engine.sample_rate}Hz")
+            print(f"速度：四分音符 = {config.bpm:g}；首拍：{chart.start:.3f}s；目标数：{len(chart.targets)}")
+            print("配置与音乐检查通过；尚未打开音频设备。")
+            return 0
+        app = RhythmApp(args.config)
+        try:
+            from rhythm_game.window import RhythmWindow
+            window = RhythmWindow(app)
+            result = window.run(args.demo_seconds, args.screenshot)
+        finally:
+            app.close()
+        print(f"本轮命中 {result['hits']}，漏拍 {result['misses']}，音频欠载 {result['underruns']}")
+        estimate = app.engine.latency_summary()
+        if estimate["count"]:
+            print(f"软件排程至计划 DAC 输出估计：P50 {estimate['p50_ms']:.1f}ms，"
+                  f"P95 {estimate['p95_ms']:.1f}ms，最大 {estimate['max_ms']:.1f}ms；非声学实测")
+        print(f"软件输入记录：{result['log']}")
+        return 0
+    except ImportError as exc:
+        print(f"缺少运行依赖：{exc}。请先运行 python -m pip install -r requirements.txt", file=sys.stderr)
+    except Exception as exc:
+        print(f"启动／运行失败：{exc}", file=sys.stderr)
+    return 1
 
-        if(last == None):
-            last = now
-            print("第1个节奏开始 True")
-            continue
 
-        duration = now - last
-        
-        BeatTime = 0
-        for t in range(i+1):
-            BeatTime = BeatTime + getBeatTime(rythem_arr[t])
-
-        if(duration >= BeatTime-MaxError and duration <= BeatTime+MaxError):
-            isCorrect = True
-        else:
-            isCorrect = False
-        print("第%d个节奏结束  间隔=%.3fs  目标=%.3fs 误差允许范围=%.3f %s 第%d个节奏开始" 
-              % (i+1, duration, BeatTime, MaxError, isCorrect, i+2))   
-        
-        i += 1          
-
-
-
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -1,0 +1,186 @@
+"""独立 TOML 配置；所有素材路径相对于配置文件。"""
+
+from dataclasses import dataclass
+import math
+import os
+from pathlib import Path
+import re
+import tempfile
+import tomllib
+
+
+@dataclass(frozen=True)
+class Config:
+    source: Path
+    music_path: Path
+    music_volume: float
+    bpm: float
+    beat_start_seconds: float
+    beat_offset_ms: float
+    beats_per_bar: int
+    lead_in_bars: int
+    note_values: tuple[int, ...]
+    window_ms: float
+    input_offset_ms: float
+    device: str | None
+    blocksize: int
+    clap_path: Path | None
+    clap_volume: float
+    width: int
+    height: int
+    lookahead_seconds: float
+
+
+def load_config(path: str | Path) -> Config:
+    source = Path(path).resolve()
+    return parse_config_text(source.read_text(encoding="utf-8"), source)
+
+
+def parse_config_text(text: str, source: str | Path) -> Config:
+    source = Path(source).resolve()
+    data = tomllib.loads(text)
+    allowed = {
+        "music": {"path", "volume"},
+        "rhythm": {"bpm", "beat_start_seconds", "beat_offset_ms", "beats_per_bar", "lead_in_bars", "note_values"},
+        "judgment": {"window_ms", "input_offset_ms"},
+        "audio": {"device", "blocksize", "clap_path", "clap_volume"},
+        "display": {"width", "height", "lookahead_seconds"},
+    }
+    for section, values in data.items():
+        if section not in allowed or not isinstance(values, dict):
+            raise ValueError(f"未知配置区段：{section}")
+        unknown = values.keys() - allowed[section]
+        if unknown:
+            raise ValueError(f"{section} 中有未知配置：{', '.join(sorted(unknown))}")
+    for section in allowed:
+        if section not in data:
+            raise ValueError(f"配置缺少 [{section}]")
+
+    def value(section, key):
+        try:
+            return data[section][key]
+        except KeyError as exc:
+            raise ValueError(f"配置缺少 {section}.{key}") from exc
+
+    def number(section, key, minimum=None, maximum=None, integer=False):
+        result = value(section, key)
+        if isinstance(result, bool) or not isinstance(result, (int, float)) or not math.isfinite(result):
+            raise ValueError(f"{section}.{key} 必须是有限数字")
+        if integer and not isinstance(result, int):
+            raise ValueError(f"{section}.{key} 必须是整数")
+        if minimum is not None and result < minimum or maximum is not None and result > maximum:
+            raise ValueError(f"{section}.{key} 超出范围 [{minimum}, {maximum}]")
+        return result
+
+    def text(section, key):
+        result = value(section, key)
+        if not isinstance(result, str):
+            raise ValueError(f"{section}.{key} 必须是字符串")
+        return result
+
+    music = text("music", "path")
+    if not music.strip():
+        raise ValueError("music.path 不能为空")
+    music_path = source.parent / music
+    if not music_path.is_file():
+        raise ValueError(f"找不到音乐文件：{music_path}")
+    clap = text("audio", "clap_path")
+    clap_path = source.parent / clap if clap else None
+    if clap_path is not None and not clap_path.is_file():
+        raise ValueError(f"找不到拍手音效：{clap_path}")
+    note_values = value("rhythm", "note_values")
+    if not isinstance(note_values, list) or not note_values:
+        raise ValueError("rhythm.note_values 必须是非空整数数组")
+    if any(isinstance(n, bool) or not isinstance(n, int) or n not in (1, 2, 4, 8, 16, 32, 64) for n in note_values):
+        raise ValueError("rhythm.note_values 只接受 1、2、4、8、16、32、64 的常规音符分母")
+    bpm = number("rhythm", "bpm", 1, 600)
+    beats_per_bar = number("rhythm", "beats_per_bar", 1, 32, integer=True)
+    if not math.isclose(sum(4 / n for n in note_values), beats_per_bar, abs_tol=1e-9):
+        raise ValueError("note_values 时值之和必须恰好填满一个小节（4 / 分母 = 拍数）")
+    beat_start = number("rhythm", "beat_start_seconds", 0)
+    beat_offset = number("rhythm", "beat_offset_ms")
+    if beat_start + beat_offset / 1000 < 0:
+        raise ValueError("拍点起始时间加整曲偏移后不能小于 0")
+    window = number("judgment", "window_ms", 1, 1000)
+    if window * 2 / 1000 > min(4 / n for n in note_values) * 60 / bpm:
+        raise ValueError("判定窗口过宽，会覆盖相邻目标的中点；请缩小 window_ms")
+    return Config(
+        source, music_path, number("music", "volume", 0, 1), bpm,
+        beat_start, beat_offset, beats_per_bar,
+        number("rhythm", "lead_in_bars", 0, 1, integer=True), tuple(note_values), window,
+        number("judgment", "input_offset_ms", -1000, 1000),
+        text("audio", "device").strip() or None,
+        number("audio", "blocksize", 0, 8192, integer=True), clap_path,
+        number("audio", "clap_volume", 0, 1),
+        number("display", "width", 1000, 3840, integer=True),
+        number("display", "height", 700, 2160, integer=True),
+        number("display", "lookahead_seconds", 0.5, 10),
+    )
+
+
+EDITABLE_FIELDS = {
+    "beat_offset_ms": ("rhythm", "beat_offset_ms"),
+    "input_offset_ms": ("judgment", "input_offset_ms"),
+    "window_ms": ("judgment", "window_ms"),
+    "blocksize": ("audio", "blocksize"),
+    "music_volume": ("music", "volume"),
+    "clap_volume": ("audio", "clap_volume"),
+}
+
+
+def prepare_config_update(path, updates, expected_text):
+    """仅改页面负责的数字字段；保留素材、其他配置及行内注释。"""
+    source = Path(path).resolve()
+    original = source.read_text(encoding="utf-8")
+    if original != expected_text:
+        raise ValueError("配置已被外部修改，请返回游戏后重新打开设置")
+    if not updates or updates.keys() - EDITABLE_FIELDS.keys():
+        raise ValueError("设置包含未知或空字段")
+    replacements = {}
+    for name, value in updates.items():
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError(f"{name} 必须是有限数字")
+        if name == "blocksize":
+            if int(value) != value:
+                raise ValueError("音频缓冲必须为整数")
+            value = int(value)
+        replacements[EDITABLE_FIELDS[name]] = str(value)
+    section = None
+    lines = []
+    for line in original.splitlines(keepends=True):
+        header = re.match(r"\s*\[([^\]]+)\]", line)
+        if header:
+            section = header[1]
+        assignment = re.match(r"(\s*)(\w+)(\s*=\s*)([^#\r\n]*)(.*)", line.rstrip("\r\n"))
+        if assignment and (section, assignment[2]) in replacements:
+            value_part = assignment[4]
+            spacing = value_part[len(value_part.rstrip()):]
+            newline = "\n" if line.endswith("\n") else ""
+            line = (assignment[1] + assignment[2] + assignment[3]
+                    + replacements.pop((section, assignment[2])) + spacing + assignment[5] + newline)
+        lines.append(line)
+    if replacements:
+        raise ValueError("配置中缺少待修改字段")
+    updated = "".join(lines)
+    return updated, parse_config_text(updated, source)
+
+
+def save_config_text(path, text, expected_text):
+    """校验并原子替换，失败时不留下部分写入的配置。"""
+    path = Path(path).resolve()
+    parse_config_text(text, path)
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=path.parent,
+                                         prefix=f".{path.name}.", suffix=".tmp", delete=False) as stream:
+            temporary = Path(stream.name)
+            stream.write(text)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.chmod(temporary, path.stat().st_mode & 0o777)
+        if path.read_text(encoding="utf-8") != expected_text:
+            raise ValueError("配置已被外部修改，请重新打开设置")
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
