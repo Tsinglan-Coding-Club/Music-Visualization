@@ -9,6 +9,8 @@ import re
 import tempfile
 import tomllib
 
+from .notation import normalize_pattern, parse_note
+
 
 @dataclass(frozen=True)
 class Config:
@@ -20,7 +22,7 @@ class Config:
     beat_offset_ms: float
     beats_per_bar: int
     lead_in_bars: int
-    note_values: tuple[int, ...]
+    note_values: tuple[int | str, ...]
     window_ms: float
     input_offset_ms: float
     device: str | None
@@ -34,6 +36,9 @@ class Config:
     glove_port: str = ""
     glove_baudrate: int = 115200
     glove_debounce_ms: float = 30.0
+    patterns: tuple[tuple[int | str, ...], ...] = ()
+    game_bars: int = 4
+    max_mistakes: int = 3
 
 
 def load_config(path: str | Path) -> Config:
@@ -46,8 +51,8 @@ def parse_config_text(text: str, source: str | Path) -> Config:
     data = tomllib.loads(text)
     allowed = {
         "music": {"path", "volume"},
-        "rhythm": {"bpm", "beat_start_seconds", "beat_offset_ms", "beats_per_bar", "lead_in_bars", "note_values"},
-        "judgment": {"window_ms", "input_offset_ms"},
+        "rhythm": {"bpm", "beat_start_seconds", "beat_offset_ms", "beats_per_bar", "lead_in_bars", "note_values", "patterns", "game_bars"},
+        "judgment": {"window_ms", "input_offset_ms", "max_mistakes"},
         "audio": {"device", "blocksize", "clap_path", "clap_volume"},
         "display": {"width", "height", "lookahead_seconds"},
         "glove": {"enabled", "port", "baudrate", "debounce_ms"},
@@ -65,6 +70,10 @@ def parse_config_text(text: str, source: str | Path) -> Config:
                      **data.get("glove", {})}
     if not isinstance(data["glove"]["enabled"], bool):
         raise ValueError("glove.enabled 必须是布尔值")
+
+    data["rhythm"].setdefault("game_bars", 4)
+    data["rhythm"].setdefault("lead_in_bars", 1)
+    data["judgment"].setdefault("max_mistakes", 3)
 
     def value(section, key):
         try:
@@ -98,22 +107,20 @@ def parse_config_text(text: str, source: str | Path) -> Config:
     clap_path = source.parent / clap if clap else None
     if clap_path is not None and not clap_path.is_file():
         raise ValueError(f"找不到拍手音效：{clap_path}")
-    note_values = value("rhythm", "note_values")
-    if not isinstance(note_values, list) or not note_values:
-        raise ValueError("rhythm.note_values 必须是非空整数数组")
-    if any(isinstance(n, bool) or not isinstance(n, int) or n not in (1, 2, 4, 8, 16, 32, 64) for n in note_values):
-        raise ValueError("rhythm.note_values 只接受 1、2、4、8、16、32、64 的常规音符分母")
     bpm = number("rhythm", "bpm", 1, 600)
     beats_per_bar = number("rhythm", "beats_per_bar", 1, 32, integer=True)
-    if not math.isclose(sum(4 / n for n in note_values), beats_per_bar, abs_tol=1e-9):
-        raise ValueError("note_values 时值之和必须恰好填满一个小节（4 / 分母 = 拍数）")
+    note_values = normalize_pattern(value("rhythm", "note_values"), beats_per_bar)
+    raw_patterns = data["rhythm"].get("patterns", [note_values])
+    if not isinstance(raw_patterns, (list, tuple)) or not raw_patterns:
+        raise ValueError("rhythm.patterns 必须是非空的小节数组")
+    patterns = tuple(normalize_pattern(pattern, beats_per_bar) for pattern in raw_patterns)
+    if note_values != patterns[0]:
+        raise ValueError("rhythm.note_values 必须与 rhythm.patterns 的第一个小节一致")
     beat_start = number("rhythm", "beat_start_seconds", 0)
     beat_offset = number("rhythm", "beat_offset_ms")
     if beat_start + beat_offset / 1000 < 0:
         raise ValueError("拍点起始时间加整曲偏移后不能小于 0")
     window = number("judgment", "window_ms", 1, 1000)
-    if window * 2 / 1000 > min(4 / n for n in note_values) * 60 / bpm:
-        raise ValueError("判定窗口过宽，会覆盖相邻目标的中点；请缩小 window_ms")
     return Config(
         source, music_path, number("music", "volume", 0, 1), bpm,
         beat_start, beat_offset, beats_per_bar,
@@ -128,6 +135,8 @@ def parse_config_text(text: str, source: str | Path) -> Config:
         data["glove"]["enabled"], text("glove", "port").strip(),
         number("glove", "baudrate", 1, 3000000, integer=True),
         number("glove", "debounce_ms", 0, 1000),
+        patterns, number("rhythm", "game_bars", 1, 128, integer=True),
+        number("judgment", "max_mistakes", 0, 999, integer=True),
     )
 
 
@@ -137,6 +146,9 @@ EDITABLE_FIELDS = {
     "beat_start_seconds": ("rhythm", "beat_start_seconds"),
     "beats_per_bar": ("rhythm", "beats_per_bar"),
     "note_values": ("rhythm", "note_values"),
+    "patterns": ("rhythm", "patterns"),
+    "game_bars": ("rhythm", "game_bars"),
+    "max_mistakes": ("judgment", "max_mistakes"),
     "lead_in_bars": ("rhythm", "lead_in_bars"),
     "beat_offset_ms": ("rhythm", "beat_offset_ms"),
     "input_offset_ms": ("judgment", "input_offset_ms"),
@@ -206,17 +218,21 @@ def prepare_config_update(path, updates, expected_text):
             except ValueError:
                 stored_path = music_path
             serialized = json.dumps(str(stored_path), ensure_ascii=False)
-        elif name == "note_values":
+        elif name in ("note_values", "patterns"):
             if not isinstance(value, (list, tuple)) or not value:
-                raise ValueError("note_values 必须是非空整数数组")
-            if any(isinstance(n, bool) or not isinstance(n, int)
-                   or n not in (1, 2, 4, 8, 16, 32, 64) for n in value):
-                raise ValueError("note_values 只接受 1、2、4、8、16、32、64 的常规音符分母")
-            serialized = json.dumps(list(value))
+                raise ValueError(f"{name} 必须是非空数组")
+            patterns = [value] if name == "note_values" else value
+            normalized = []
+            for pattern in patterns:
+                if not isinstance(pattern, (list, tuple)) or not pattern:
+                    raise ValueError(f"{name} 中每个小节必须是非空音符数组")
+                normalized.append(tuple(parse_note(note).token for note in pattern))
+            serialized = json.dumps(normalized[0] if name == "note_values" else normalized,
+                                    ensure_ascii=False)
         else:
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
                 raise ValueError(f"{name} 必须是有限数字")
-            if name in ("blocksize", "beats_per_bar", "lead_in_bars"):
+            if name in ("blocksize", "beats_per_bar", "lead_in_bars", "game_bars", "max_mistakes"):
                 if int(value) != value:
                     raise ValueError(f"{name} 必须为整数")
                 value = int(value)
@@ -225,8 +241,8 @@ def prepare_config_update(path, updates, expected_text):
 
     section = None
     position = 0
-    copied_until = 0
-    parts = []
+    headers = {}
+    edits = []
     while position < len(original):
         end = original.find("\n", position)
         end = len(original) if end == -1 else end + 1
@@ -234,23 +250,36 @@ def prepare_config_update(path, updates, expected_text):
         header = re.match(r"\s*\[([^\]]+)\]", line)
         if header:
             section = header[1]
+            headers[section] = end
         assignment = re.match(r"([ \t]*)(\w+)([ \t]*=[ \t]*)", line)
         if assignment:
             value_start = position + assignment.end()
             value_end, comments = _toml_value_end(original, value_start)
             key = (section, assignment[2])
             if key in replacements:
-                parts.append(original[copied_until:position])
                 # 多行数组转为单行时，将其内部注释放在字段前，避免丢失说明。
-                parts.extend(assignment[1] + comment + "\n" for comment in comments)
-                parts.append(original[position:value_start])
-                parts.append(replacements.pop(key))
-                copied_until = value_end
+                prefix = "".join(assignment[1] + comment + "\n" for comment in comments)
+                edits.append((position, value_end, prefix + original[position:value_start]
+                              + replacements.pop(key)))
             end = original.find("\n", value_end)
             end = len(original) if end == -1 else end + 1
         position = end
-    if replacements:
+    optional = {("rhythm", "patterns"), ("rhythm", "game_bars"), ("judgment", "max_mistakes")}
+    if replacements.keys() - optional:
         raise ValueError("配置中缺少待修改字段")
+    insertions = {}
+    for (section, key), serialized in replacements.items():
+        if section not in headers:
+            raise ValueError(f"配置缺少 [{section}]")
+        insertions.setdefault(headers[section], []).append(f"{key} = {serialized}\n")
+    for position, values in insertions.items():
+        prefix = "" if original[:position].endswith("\n") else "\n"
+        edits.append((position, position, prefix + "".join(values)))
+    parts = []
+    copied_until = 0
+    for start, end, replacement in sorted(edits):
+        parts.extend((original[copied_until:start], replacement))
+        copied_until = end
     parts.append(original[copied_until:])
     updated = "".join(parts)
     return updated, parse_config_text(updated, source)

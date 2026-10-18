@@ -2,7 +2,6 @@
 
 import math
 from pathlib import Path
-import re
 import textwrap
 
 import arcade
@@ -10,6 +9,7 @@ import arcade
 from .app import BG, PANEL, LINE, TEXT, MUTED, GREEN, PURPLE, RED
 from .calibration import BeatCalibrator, TempoCalibrator
 from .music_library import discover_music
+from .notation import parse_pattern, normalize_pattern, format_pattern
 
 
 # name, title, unit, step; 无步进的字段直接输入。
@@ -19,7 +19,8 @@ FIELDS = (
     ("note_values", "节奏时值", "分母", None),
     ("beat_start_seconds", "初始拍位置", "秒", .1),
     ("beat_offset_ms", "拍点微调", "ms", 5),
-    ("lead_in_bars", "预备小节数", "小节", 1),
+    ("game_bars", "正式游戏长度", "小节", 1),
+    ("max_mistakes", "输掉所需错误数", "次", 1),
     ("input_offset_ms", "输入补偿", "ms", 5),
     ("window_ms", "判定容差", "ms", 5),
     ("blocksize", "音频缓冲", "帧", 64),
@@ -27,8 +28,12 @@ FIELDS = (
     ("clap_volume", "拍手音量", "%", 5),
 )
 FIELD_MAP = {field[0]: field for field in FIELDS}
-TAB_FIELDS = {"music": tuple(field[0] for field in FIELDS[:6]),
-              "audio": tuple(field[0] for field in FIELDS[6:]), "calibration": ()}
+TAB_FIELDS = {
+    "music": ("bpm", "beats_per_bar", "note_values", "beat_start_seconds", "beat_offset_ms"),
+    "game": ("game_bars", "max_mistakes"),
+    "audio": ("input_offset_ms", "window_ms", "blocksize", "music_volume", "clap_volume"),
+    "calibration": (),
+}
 
 
 class SettingsPage:
@@ -40,7 +45,7 @@ class SettingsPage:
         for name, *_ in FIELDS:
             value = getattr(self.app.config, name)
             if name == "note_values":
-                self.values[name] = ", ".join(str(n) for n in value)
+                self.values[name] = format_pattern(self.app.config.patterns or (value,))
             else:
                 if name.endswith("volume"):
                     value *= 100
@@ -72,14 +77,14 @@ class SettingsPage:
 
     def updates(self):
         values = {name: self._number(name) for name, *_ in FIELDS if name != "note_values"}
-        for name in ("beats_per_bar", "lead_in_bars", "blocksize"):
+        for name in ("beats_per_bar", "game_bars", "max_mistakes", "blocksize"):
             if not values[name].is_integer():
                 raise ValueError(f"{FIELD_MAP[name][1]}必须为整数")
             values[name] = int(values[name])
-        raw = self.values["note_values"].strip()
-        if not re.fullmatch(r"\d+(?:[\s,，]+\d+)*", raw):
-            raise ValueError("节奏时值请输入用逗号或空格分隔的音符分母，例如 4, 8, 8, 4, 4")
-        values["note_values"] = [int(n) for n in re.split(r"[\s,，]+", raw)]
+        patterns = parse_pattern(self.values["note_values"])
+        patterns = tuple(normalize_pattern(bar, values["beats_per_bar"]) for bar in patterns)
+        values["note_values"] = list(patterns[0])
+        values["patterns"] = [list(bar) for bar in patterns]
         values["music_path"] = self.values["music_path"]
         for name in ("music_volume", "clap_volume"):
             values[name] /= 100
@@ -98,7 +103,7 @@ class SettingsPage:
             step = FIELD_MAP[name][3]
             value = self._number(name) + step * direction
             limits = {"bpm": (1, 600), "beats_per_bar": (1, 32), "beat_start_seconds": (0, math.inf),
-                      "lead_in_bars": (0, 1), "input_offset_ms": (-1000, 1000), "window_ms": (1, 1000),
+                      "game_bars": (1, 128), "max_mistakes": (0, 999), "input_offset_ms": (-1000, 1000), "window_ms": (1, 1000),
                       "blocksize": (0, 8192), "music_volume": (0, 100), "clap_volume": (0, 100)}
             if name in limits:
                 lower, upper = limits[name]
@@ -266,12 +271,12 @@ class SettingsPage:
         if name == "music_path":
             value = "".join(c for c in value if c.isprintable())
         else:
-            allowed = "0123456789,， " if name == "note_values" else "0123456789.-+"
+            allowed = "0123456789,， .|" if name == "note_values" else "0123456789.-+"
             value = "".join(c for c in value if c in allowed)
         if not value:
             return
         old = "" if self.select_all else self.values[name]
-        self.values[name] = (old + value)[:4096 if name == "music_path" else 512 if name == "note_values" else 16]
+        self.values[name] = (old + value)[:4096 if name == "music_path" else 4096 if name == "note_values" else 16]
         self._edited(name)
         self.select_all = False
 
@@ -324,10 +329,34 @@ class SettingsPage:
         self._button("music-select", "选择音乐", (1080, 184, 152, 42), self.choose_music)
         w._text("music-hint", "列表读取 music/ 目录；也可直接输入完整路径。音乐按原速播放，BPM 用于拍点与判定。",
                 48, 240, 15, MUTED)
-        for index, name in enumerate(TAB_FIELDS["music"]):
-            self._field(name, 48 + (index % 2) * 606, 295 + (index // 2) * 112, 532)
-        w._text("rhythm-help", "时值示例：4, 8, 8, 4, 4；4 为四分音符，8 为八分音符。总时值须填满一小节。",
-                48, 650, 15, MUTED)
+        self._field("bpm", 48, 292, 532)
+        self._field("beats_per_bar", 654, 292, 532)
+        self._field("note_values", 48, 401, 1184)
+        w._text("rhythm-help", "16 为十六分音符，8. 为附点八分音符；用 | 分隔不同小节，每小节总时值须填满。",
+                48, 486, 15, MUTED)
+        self._field("beat_start_seconds", 48, 532, 532)
+        self._field("beat_offset_ms", 654, 532, 532)
+        self._button("triple-example", "三拍示例", (48, 626, 124, 40), lambda: self.use_pattern_example(3))
+        self._button("quadruple-example", "四拍示例", (188, 626, 124, 40), lambda: self.use_pattern_example(4))
+        w._text("pattern-cycle", "多个谱面小节循环使用；正式游戏长度在“游戏规则”设置。", 336, 638, 15, MUTED)
+
+    def use_pattern_example(self, beats):
+        self.values["beats_per_bar"] = str(beats)
+        self.values["note_values"] = ("8,16,16,8.,16,4 | 16,16,8,16,8.,4" if beats == 3
+                                     else "8,16,16,8.,16,16,16,8,4 | 16,16,8,16,8.,8,16,16,4")
+        self.focus = "note_values"
+        self.select_all = True
+        self._message("已填入节奏示例，可继续修改；保存后生效。")
+
+    def _draw_game(self):
+        w = self.window
+        self._field("game_bars", 48, 170, 532)
+        self._field("max_mistakes", 654, 170, 532)
+        w._text("game-errors-help", "错误数达到设置值即输掉；0 表示不设上限。漏拍、多拍和错拍都计错。", 48, 282, 18)
+        w._text("game-errors-dedupe", "已经计过漏拍的目标，迟来的补拍不重复扣错；预备小节不计输赢。", 48, 322, 16, MUTED)
+        w._text("game-start-help", "拍手启动 → 等归属小节结束 → 一个完整小节逐拍预备、倒计时 → 正式游戏", 48, 390, 18)
+        w._text("game-last-beat-help", "最后一拍的启动归入下一小节；三拍子的第 3 拍、四拍子的第 4 拍同样处理。", 48, 432, 16, MUTED)
+        w._text("game-retry-help", "成功或输掉都只结束本次互动，音乐继续；再次拍手可重新开始。", 48, 486, 18)
 
     def _draw_audio(self):
         w = self.window
@@ -405,10 +434,10 @@ class SettingsPage:
         self._field_rects.clear()
         w._text("settings-title", "Demo 设置", 48, 26, 26)
         self._button("return", "取消并返回", (1072, 24, 160, 42), w.close_settings, enabled=not self.calibrating)
-        for index, (tab, title) in enumerate((("music", "音乐与节奏"), ("calibration", "校准"), ("audio", "声音与输入"))):
+        for index, (tab, title) in enumerate((("music", "音乐与节奏"), ("game", "游戏规则"), ("calibration", "校准"), ("audio", "声音与输入"))):
             self._button(("tab", tab), title, (48 + index * 180, 88, 164, 42),
                          lambda t=tab: self.switch_tab(t), primary=self.tab == tab, enabled=not self.calibrating)
-        {"music": self._draw_music, "calibration": self._draw_calibration, "audio": self._draw_audio}[self.tab]()
+        {"music": self._draw_music, "game": self._draw_game, "calibration": self._draw_calibration, "audio": self._draw_audio}[self.tab]()
         for index, line in enumerate(textwrap.wrap(self.status, width=68)[:2]):
             w._text(("settings-status", index), line, 48, 686 + index * 22, 15, self.status_color, max_width=1184)
         self._button("save", "保存并返回", (48, 744, 160, 42), self.save, primary=True, enabled=not self.calibrating)

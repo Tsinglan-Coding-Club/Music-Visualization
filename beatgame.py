@@ -1,4 +1,4 @@
-"""《主音归来》节奏互动第 1 阶段入口。Python 3.11+。"""
+"""《主音归来》节奏互动demo 入口。Python 3.11+。"""
 
 import argparse
 from pathlib import Path
@@ -6,7 +6,7 @@ import sys
 
 
 def main():
-    parser = argparse.ArgumentParser(description="音乐播放、键盘拍掌与简易节奏判定")
+    parser = argparse.ArgumentParser(description="音乐选择、手套／键盘拍掌与多小节节奏互动")
     parser.add_argument("--config", type=Path, default=Path(__file__).resolve().with_name("config.toml"))
     parser.add_argument("--list-devices", action="store_true", help="列出音频设备后退出")
     parser.add_argument("--check", action="store_true", help="验证配置、解码音乐与生成目标，不播放声音")
@@ -31,6 +31,8 @@ def main():
             chart = make_chart(config, engine.duration)
             print(f"音乐：{config.music_path.name}，{engine.duration:.3f}s，{engine.sample_rate}Hz")
             print(f"速度：四分音符 = {config.bpm:g}；首拍：{chart.start:.3f}s；目标数：{len(chart.targets)}")
+            print(f"拍号：{config.beats_per_bar}/4；循环谱面：{len(config.patterns)} 小节；"
+                  f"正式游戏：{config.game_bars} 小节；错误上限：{config.max_mistakes or '不限'}")
             print("配置与音乐检查通过；尚未打开音频设备。")
             return 0
         app = RhythmApp(args.config, enable_glove=args.demo_seconds is None)
@@ -40,7 +42,8 @@ def main():
             result = window.run(args.demo_seconds, args.screenshot)
         finally:
             app.close()
-        print(f"本轮命中 {result['hits']}，漏拍 {result['misses']}，音频欠载 {result['underruns']}")
+        print(f"本轮命中 {result['hits']}，漏拍 {result['misses']}，错误 {result['mistakes']}，"
+              f"{'失败' if result['failed'] else '未失败'}，音频欠载 {result['underruns']}")
         estimate = app.engine.latency_summary()
         if estimate["count"]:
             print(f"软件排程至计划 DAC 输出估计：P50 {estimate['p50_ms']:.1f}ms，"

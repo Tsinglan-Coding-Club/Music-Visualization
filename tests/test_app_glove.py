@@ -45,6 +45,7 @@ class GloveAppTests(unittest.TestCase):
 
     def test_hand_sounds_before_update_then_scores_once(self):
         self.app.start()
+        self.app.session.arm(4)
         self.send()
         self.assertEqual(self.app.engine.claps, 1)
         self.assertEqual(self.app.session.hits, 0)
@@ -57,6 +58,28 @@ class GloveAppTests(unittest.TestCase):
         self.app.log.flush()
         rows = [json.loads(line) for line in self.app.log_path.read_text().splitlines()]
         self.assertEqual(next(row for row in rows if row["event"] == "clap")["source"], "glove")
+
+    def test_hand_can_trigger_on_middle_beat_then_prepare_and_play(self):
+        self.app.start()
+        generation = self.app.expected_generation
+
+        def hand_at(position, onset):
+            self.send(position=position, onset=onset)
+            self.app.engine.clock = ClockReading(generation, position + .12, True)
+            self.app.update()
+
+        hand_at(5.1, 101)
+        self.assertEqual(self.app.session.attributed_bar, 1)
+        self.assertAlmostEqual(self.app.session.entry_time, 4 + 16 / 3)
+        for i, target in enumerate(self.app.session.preparation_targets):
+            hand_at(target.time, 102 + i)
+        self.assertEqual(self.app.session.prep_hits, 4)
+        self.assertEqual(self.app.session.hits, 0)
+        hand_at(self.app.session.entry_time, 106)
+        self.assertEqual(self.app.session.hits, 1)
+        self.assertEqual(self.app.session.mistakes, 0)
+        self.assertEqual(self.app.engine.claps, 6)
+        self.assertEqual(self.app.expected_generation, generation)
 
     def test_confirmation_delay_does_not_turn_in_window_edge_into_miss(self):
         self.app.start()

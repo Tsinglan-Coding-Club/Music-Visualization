@@ -25,7 +25,7 @@ RED = (180, 45, 45)
 
 def make_chart(config, duration):
     return RhythmChart(config.bpm, config.beats_per_bar, config.beat_start_seconds,
-                       config.beat_offset_ms, config.note_values, duration)
+                       config.beat_offset_ms, config.note_values, duration, patterns=config.patterns or None)
 
 
 class RhythmApp:
@@ -35,7 +35,7 @@ class RhythmApp:
         self.engine = AudioEngine(self.config)
         self.chart = make_chart(self.config, self.engine.duration)
         self.session = RhythmSession(self.chart, self.config.window_ms, self.config.input_offset_ms,
-                                     lead_in_bars=self.config.lead_in_bars)
+                                     game_bars=self.config.game_bars, max_mistakes=self.config.max_mistakes)
         self.desired_playing = False
         self.paused = False
         self.expected_generation = 0
@@ -43,8 +43,10 @@ class RhythmApp:
         self.feedback_time = 0.0
         self.last_judge_time = 0.0
         self._logged_states = set()
+        self._logged_preparation_states = set()
         self.auto_input = False
         self._auto_target_cursor = 0
+        self._auto_schedule = None
         self._round_reported = False
         self.inputs = InputBridge()
         self.glove = None
@@ -64,7 +66,8 @@ class RhythmApp:
             raise
         self.record("configuration", bpm=self.config.bpm, beat_start=self.chart.start,
                     beats_per_bar=self.config.beats_per_bar, note_values=self.config.note_values,
-                    lead_in_bars=self.config.lead_in_bars,
+                    patterns=self.config.patterns, game_bars=self.config.game_bars,
+                    max_mistakes=self.config.max_mistakes,
                     beat_offset_ms=self.config.beat_offset_ms,
                     input_offset_ms=self.config.input_offset_ms, window_ms=self.config.window_ms,
                     sample_rate=self.engine.sample_rate, blocksize=self.config.blocksize,
@@ -167,21 +170,24 @@ class RhythmApp:
         self.paused = False
         self.last_judge_time = 0.0
         self._logged_states.clear()
+        self._logged_preparation_states.clear()
         self._auto_target_cursor = 0
+        self._auto_schedule = None
         self.session.reset()
         self._round_reported = False
         self._activate_inputs()
-        self.message("等待启动拍手", "任意小节第一拍按空格，预备后打一小节", PURPLE)
+        self.message("等待启动拍手", "拍手启动；归属小节结束后逐拍预备，再进入正式游戏", PURPLE)
         self.record("start", entry_time=None, input_mode=input_mode)
 
     def reset_round(self):
         self._invalidate_inputs()
         self.session.reset()
         self._logged_states.clear()
+        self._logged_preparation_states.clear()
         self._round_reported = False
         if self.desired_playing:
             self._activate_inputs()
-        self.message("等待启动拍手", "任意小节第一拍按空格，预备后打一小节", PURPLE)
+        self.message("等待启动拍手", "拍手启动；归属小节结束后逐拍预备，再进入正式游戏", PURPLE)
         self.record("reset_round")
 
     def toggle_pause(self):
@@ -211,6 +217,7 @@ class RhythmApp:
         self.session.reset()
         self.last_judge_time = 0.0
         self._logged_states.clear()
+        self._logged_preparation_states.clear()
         self._round_reported = False
         self.message("已停止", "按 Enter 重新播放")
         self.record("stop")
@@ -242,34 +249,39 @@ class RhythmApp:
         self._advance_session(position)
         if self.session.entry_time is None or self.session.finished:
             if not self.session.try_start(position):
-                self.message("等待小节第一拍", "拍手声已触发；第一拍拍手才出现本小节短线", PURPLE)
+                if self.session.entry_time is None:
+                    reasons = {"before_chart": "音乐拍点开始后可拍手启动", "insufficient_music": "剩余音乐不足以容纳预备和正式游戏，请重播或减少游戏小节数"}
+                    self.message("等待启动拍手", reasons.get(self.session.start_rejection, "拍手即可启动"), PURPLE)
                 self.record("clap", source=source, host_time=host_time, music_time=position,
                             corrected_time=position - self.config.input_offset_ms / 1000,
                             target_index=None, target_time=None, status="waiting", error_ms=None)
                 return
             self._logged_states.clear()
+            self._logged_preparation_states.clear()
             self._round_reported = False
             self.record("round_start", entry_time=self.session.entry_time,
-                        round_end_time=self.session.round_end_time,
-                        trigger_time=self.session.trigger_time, lead_in_bars=self.config.lead_in_bars)
-            if self.config.lead_in_bars:
-                self.message("预备一小节" if self.config.lead_in_bars == 1 else "预备中",
-                             f"{self.session.entry_time:.3f} 秒正式开始；这次拍手不计分", PURPLE)
-                self.record("clap", source=source, host_time=host_time, music_time=position,
-                            corrected_time=position - self.config.input_offset_ms / 1000,
-                            target_index=None, target_time=None, status="preparing", error_ms=None)
-                return
+                        preparation_start_time=self.session.preparation_start_time,
+                        round_end_time=self.session.round_end_time, game_bars=self.config.game_bars,
+                        trigger_time=self.session.trigger_time, attributed_bar=self.session.attributed_bar)
+            self.message("已启动", "等归属小节结束，下一小节逐拍预备", PURPLE)
+            self.record("clap", source=source, host_time=host_time, music_time=position,
+                        corrected_time=position - self.config.input_offset_ms / 1000,
+                        target_index=None, target_time=None, status="trigger", error_ms=None)
+            return
         result = self.session.judge(position)
         labels = {"hit": "命中", "early": "太早了", "late": "太晚了",
-                  "duplicate": "重复拍掌", "waiting": "等待主拍"}
-        color = GREEN if result.status == "hit" else PURPLE if result.status == "waiting" else RED
-        detail = f"{result.error_ms:+.1f} ms" if result.error_ms is not None else "拍掌声已触发；尚未进入判定窗口"
-        self.message(labels[result.status], detail, color)
+                  "duplicate": "重复拍掌", "waiting": "等待预备", "preparing": "跟拍预备",
+                  "preparation_hit": "预备拍命中", "preparation_duplicate": "预备重复拍掌"}
+        color = GREEN if result.status in ("hit", "preparation_hit") else PURPLE if result.status in (
+            "waiting", "preparing", "preparation_duplicate") else RED
+        detail = f"{result.error_ms:+.1f} ms" if result.error_ms is not None else "拍掌声已触发"
+        self.message(labels.get(result.status, result.status), detail, color)
         self.record("clap", source=source, host_time=host_time, music_time=position,
                     corrected_time=position - self.config.input_offset_ms / 1000,
                     target_index=result.target.index if result.target else None,
                     target_time=result.target.time if result.target else None,
-                    status=result.status, error_ms=result.error_ms)
+                    status=result.status, error_ms=result.error_ms, mistakes=self.session.mistakes)
+        self._report_outcome()
 
     def reload(self):
         try:
@@ -330,12 +342,13 @@ class RhythmApp:
             return False
         self.engine, self.config, self.chart = replacement, config, chart
         self.session = RhythmSession(chart, config.window_ms, config.input_offset_ms,
-                                     lead_in_bars=config.lead_in_bars)
+                                     game_bars=config.game_bars, max_mistakes=config.max_mistakes)
         self.expected_generation = replacement.generation
         self._configure_glove()
         self.message("设置已保存" if text is not None else "配置已加载", f"首拍 {chart.start:.3f} 秒；按 Enter 重播", GREEN)
         self.record("reload", music_path=str(config.music_path), bpm=config.bpm,
-                    beats_per_bar=config.beats_per_bar, note_values=config.note_values, beat_start=chart.start,
+                    beats_per_bar=config.beats_per_bar, patterns=config.patterns, game_bars=config.game_bars,
+                    max_mistakes=config.max_mistakes, note_values=config.note_values, beat_start=chart.start,
                     beat_offset_ms=config.beat_offset_ms, input_offset_ms=config.input_offset_ms,
                     window_ms=config.window_ms, blocksize=config.blocksize)
         return True
@@ -348,11 +361,22 @@ class RhythmApp:
                 self.record("target", target_index=index, status=state,
                             target_time=self.chart.targets[index].time)
                 self._logged_states.add(index)
+        for index, state in self.session.preparation_states.items():
+            if index not in self._logged_preparation_states:
+                self.record("preparation_target", beat_index=index, status=state)
+                self._logged_preparation_states.add(index)
+        self._report_outcome()
+
+    def _report_outcome(self):
         if self.session.finished and not self._round_reported:
             self._round_reported = True
-            self.message("本小节完成", f"命中 {self.session.hits} · 漏拍 {self.session.misses}", GREEN)
-            self.record("round_end", hits=self.session.hits, misses=self.session.misses,
-                        round_end_time=self.session.round_end_time)
+            outcome = "failed" if self.session.failed else "completed"
+            self.message("本轮失败" if self.session.failed else "本轮完成",
+                         f"命中 {self.session.hits} · 漏拍 {self.session.misses} · 错误 {self.session.mistakes}；拍手重来",
+                         RED if self.session.failed else GREEN)
+            self.record("round_end", outcome=outcome, hits=self.session.hits, misses=self.session.misses,
+                        mistakes=self.session.mistakes, failure_time=self.session.failure_time,
+                        failure_reason=self.session.failure_reason, round_end_time=self.session.round_end_time)
 
     def update(self):
         # 先固定结算水位，再排空输入；随后到达且仍在接收预算内的事件
@@ -386,19 +410,23 @@ class RhythmApp:
         if not (reading.playing or in_tail) or reading.generation != self.expected_generation:
             return
         corrected = reading.position + reading.tail_seconds - self.config.input_offset_ms / 1000
-        # 一次启动信号，预备后只自动演示一个正式小节。
-        count = len(self.config.note_values)
-        first = self.config.lead_in_bars * count
-        targets = self.chart.targets[first:first + count]
-        if self.config.lead_in_bars:
-            targets = self.chart.targets[:1] + targets
-        while self._auto_target_cursor < len(targets):
-            target = targets[self._auto_target_cursor]
-            if target.time > corrected:
+        if self._auto_schedule is None:
+            plan = RhythmSession(self.chart, self.config.window_ms, self.config.input_offset_ms,
+                                 game_bars=self.config.game_bars, max_mistakes=self.config.max_mistakes)
+            onset = max(0.0, self.chart.start + self.config.input_offset_ms / 1000)
+            if not plan.try_start(onset):
+                self._auto_schedule = ()
+                return
+            times = [plan.trigger_time]
+            times.extend(target.time for target in plan.preparation_targets)
+            times.extend(target.time for target in plan.formal_targets)
+            self._auto_schedule = tuple(times)
+        while self._auto_target_cursor < len(self._auto_schedule):
+            onset = self._auto_schedule[self._auto_target_cursor]
+            if onset > corrected:
                 break
             self._auto_target_cursor += 1
-            if target.index not in self.session.states:
-                self.clap(music_time=target.time + self.config.input_offset_ms / 1000)
+            self.clap(music_time=onset + self.config.input_offset_ms / 1000)
 
     def close(self):
         if self._closed:

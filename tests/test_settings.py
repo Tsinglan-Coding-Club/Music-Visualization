@@ -90,10 +90,10 @@ class SettingsTests(unittest.TestCase):
         self.assertAlmostEqual(self.app.chart.start, 4.08)
 
     def test_tempo_calibration_does_not_require_first_beat_within_short_song(self):
-        self.page.values["beat_start_seconds"] = "25"
+        self.page.values["beat_start_seconds"] = "75"
         self.page.start_calibration()
         self.assertTrue(self.page.calibrating)
-        self.assertEqual(self.page.values["beat_start_seconds"], "25")
+        self.assertEqual(self.page.values["beat_start_seconds"], "75")
         self.assertEqual(self.app.config.beat_start_seconds, 0)
         self.assertEqual(self.path.read_text(), self.original)
         self.page.finish_calibration()
@@ -118,6 +118,27 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(self.page.calibrator.estimate().count, 1)
         self.page.tap(11, 15.99, play_sound=False, source="keyboard", settled=False)
         self.assertEqual(self.page.calibrator.estimate().count, 1)
+
+    def test_dotted_multibar_text_and_round_rules_are_saved_into_runtime(self):
+        self.page.values.update(beats_per_bar="3", note_values="8,16,16,8.,16,4 | 16,16,8,16,8.,4",
+                                game_bars="3", max_mistakes="2")
+        self.page.save()
+        self.assertTrue(self.closed)
+        self.assertEqual(self.app.config.patterns[0], (8, 16, 16, "8.", 16, 4))
+        self.assertEqual(self.app.config.patterns[1], (16, 16, 8, 16, "8.", 4))
+        self.assertEqual(self.app.session.game_bars, 3)
+        self.assertEqual(self.app.session.max_mistakes, 2)
+        self.assertEqual(self.app.chart.beats_per_bar, 3)
+
+    def test_three_and_four_beat_examples_are_complete_and_editable(self):
+        for beats in (3, 4):
+            self.page.use_pattern_example(beats)
+            updates = self.page.updates()
+            self.assertEqual(updates["beats_per_bar"], beats)
+            self.assertEqual(len(updates["patterns"]), 2)
+            self.assertEqual(updates["note_values"], updates["patterns"][0])
+            self.assertIn("8.", updates["note_values"])
+            self.assertEqual(self.page.focus, "note_values")
 
     def test_invalid_file_does_not_replace_audio_or_start_sampling(self):
         engine = self.app.engine

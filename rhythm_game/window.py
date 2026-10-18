@@ -12,6 +12,7 @@ import arcade
 
 from .app import BG, PANEL, LINE, TEXT, MUTED, GREEN, PURPLE, RED
 from .settings import SettingsPage
+from .staff import draw_staff
 
 
 DESIGN_WIDTH = 1280
@@ -155,57 +156,11 @@ class RhythmWindow(arcade.Window):
         label.draw()
 
     def _staff(self, position, bar):
-        """节奏教学图：五条谱线、固定音高与真实音符时值，不表示旋律检测。"""
-        cfg = self.controller.config
-        chart = self.controller.chart
-        session = self.controller.session
-        for staff_y in (233, 245, 257, 269, 281):
-            self._line(210, staff_y, 1110, staff_y, (150, 150, 150), 1)
-        self._line(210, 233, 210, 281, MUTED, 1.5)
-        self._line(1110, 233, 1110, 281, MUTED, 1.5)
-        self._text("signature-top", cfg.beats_per_bar, 172, 231, 24, TEXT, anchor_x="center")
-        self._text("signature-bottom", "4", 172, 259, 24, TEXT, anchor_x="center")
-        offsets = []
-        elapsed = 0.0
-        for value in cfg.note_values:
-            offsets.append(elapsed)
-            elapsed += 4 / value
-        note_xs = [255 + offset / cfg.beats_per_bar * 820 for offset in offsets]
-        entry_bar = chart.bar_at(session.entry_time) if session.entry_time is not None else None
-        current_bar = entry_bar[0] if entry_bar else bar[0] if bar else 1
-        stem_top, note_y = 219, 257
-        for index, (denominator, offset, note_x) in enumerate(zip(cfg.note_values, offsets, note_xs)):
-            target_index = (current_bar - 1) * len(cfg.note_values) + index
-            target_time = chart.start + ((current_bar - 1) * cfg.beats_per_bar + offset) * chart.beat_seconds
-            state = session.states.get(target_index)
-            active = abs(position - target_time) <= cfg.window_ms / 1000
-            color = GREEN if state == "hit" else RED if state == "miss" else PURPLE if active else TEXT
-            if denominator >= 4:
-                arcade.draw_ellipse_filled(*self._point(note_x, note_y), 16 * self._scale,
-                                           11 * self._scale, color, tilt_angle=18, num_segments=32)
-            else:
-                arcade.draw_ellipse_outline(*self._point(note_x, note_y), 16 * self._scale,
-                                            11 * self._scale, color, 2 * self._scale, tilt_angle=18,
-                                            num_segments=32)
-            stem_x = note_x + 7
-            if denominator >= 2:
-                self._line(stem_x, note_y, stem_x, stem_top, color, 2)
-            if denominator >= 8:
-                # 连续八分音符用共同符杠；孤立八分及更短时值用符尾。
-                next_eighth = denominator == 8 and index + 1 < len(cfg.note_values) and cfg.note_values[index + 1] == 8
-                previous_eighth = denominator == 8 and index > 0 and cfg.note_values[index - 1] == 8
-                if next_eighth:
-                    self._line(stem_x, stem_top + 2, note_xs[index + 1] + 7, stem_top + 2, color, 5)
-                if not next_eighth and not previous_eighth:
-                    flags = max(1, int(math.log2(denominator)) - 2)
-                    for flag in range(flags):
-                        flag_y = stem_top + flag * 7
-                        points = [(stem_x, flag_y), (stem_x + 16, flag_y + 9),
-                                  (stem_x + 18, flag_y + 21), (stem_x + 11, flag_y + 14),
-                                  (stem_x, flag_y + 7)]
-                        arcade.draw_polygon_filled([self._point(*point) for point in points], color)
-            beat_label = str(int(offset) + 1) if offset.is_integer() else "&" if (offset * 2).is_integer() else f"{offset + 1:g}"
-            self._text(("staff-beat", index), beat_label, note_x, 292, 14, MUTED, anchor_x="center")
+        """谱面随音乐连续滚动，固定音高仅用于显示节奏。"""
+        app = self.controller
+        if not app.desired_playing and not app.paused and app.session.entry_time is None:
+            position = app.chart.start
+        draw_staff(self, position, app.chart, app.session)
 
     def on_draw(self):
         if self._closed_once:
@@ -230,7 +185,7 @@ class RhythmWindow(arcade.Window):
         title, detail, color = app.feedback
         errors = {"配置未加载", "设置未保存", "设置未应用", "音频设备无法停止",
                   "音频设备无法打开", "音频输出已中断"}
-        preparing = session.entry_time is not None and position < session.entry_time
+        phase = session.phase_at(position)
         if title in errors:
             self._text("error-title", title, 640, 426, 26, RED, anchor_x="center")
             self._text("error-detail", detail, 640, 470, 14, MUTED, max_width=1000, anchor_x="center")
@@ -240,18 +195,35 @@ class RhythmWindow(arcade.Window):
             prompt = "播放结束" if position >= app.engine.duration else "按 Enter 播放"
             self._text("entry-prompt", prompt, 640, 438, 26, MUTED, anchor_x="center")
         elif session.entry_time is None:
-            self._text("entry-prompt", "第一拍拍手开始", 640, 438, 26, MUTED, anchor_x="center")
-        elif preparing:
-            beats_left = max(1, math.ceil((session.entry_time - position) / app.chart.beat_seconds))
-            self._text("feedback", f"预备 · {beats_left}", 64, 110, 26, PURPLE)
+            self._text("entry-prompt", "拍手开始", 640, 438, 26, MUTED, anchor_x="center")
+            if session.start_rejection == "insufficient_music":
+                self._text("start-rejection", "剩余音乐不足，请重播或减少游戏小节数", 640, 482, 16, MUTED, anchor_x="center")
+        elif session.failed:
+            self._text("entry-prompt", "本轮失败 · 拍手重来", 640, 438, 28, RED, anchor_x="center")
         elif session.finished:
-            self._text("entry-prompt", "本小节完成", 640, 438, 28, GREEN, anchor_x="center")
+            self._text("entry-prompt", "本轮完成 · 拍手再来", 640, 438, 28, GREEN, anchor_x="center")
+        elif phase == "lead_in":
+            self._text("feedback", "已启动 · 等待预备小节", 64, 110, 26, PURPLE)
+        elif phase == "preparing":
+            beats_left = max(1, math.ceil((session.entry_time - position) / app.chart.beat_seconds - 1e-9))
+            self._text("feedback", f"预备 · {beats_left}", 64, 106, 32, PURPLE)
+            self._text("preparation-hint", "每拍拍手", 64, 152, 16, MUTED)
+            for beat_index, target in enumerate(session.preparation_targets):
+                state = session.preparation_states.get(beat_index)
+                x = 470 + beat_index * min(50, 420 / max(1, cfg.beats_per_bar - 1))
+                self._circle(x, 132, 8, GREEN if state == "hit" else LINE)
+                self._text(("preparation-beat", beat_index), beat_index + 1, x, 150, 14, MUTED, anchor_x="center")
         else:
-            feedback = "开始" if title in ("预备一小节", "预备中") else title
+            feedback = "开始" if title in ("已启动", "预备拍命中", "跟拍预备", "等待预备") else title
             self._text("feedback", feedback, 64, 110, 26, color)
+            formal_bar = min(cfg.game_bars, max(1, int((position - session.entry_time) / app.chart.bar_seconds) + 1))
+            self._text("game-bar", f"游戏 {formal_bar} / {cfg.game_bars} 小节", 64, 154, 16, MUTED)
         if session.entry_time is not None:
             self._text("score", f"命中 {session.hits}   漏拍 {session.misses}",
-                       1216, 116, 18, MUTED, anchor_x="right")
+                       1216, 108, 17, MUTED, anchor_x="right")
+            limit = str(cfg.max_mistakes) if cfg.max_mistakes else "∞"
+            self._text("mistakes", f"错误 {session.mistakes} / {limit}",
+                       1216, 143, 17, RED if session.failed else MUTED, anchor_x="right")
 
         self._staff(position, bar)
         line_y, top_y = 650, 340
@@ -259,7 +231,7 @@ class RhythmWindow(arcade.Window):
             self._line(x, top_y, x, line_y, (225, 225, 225))
         for target in app.chart.visible_targets(position, cfg.lookahead_seconds, 0.25):
             if (session.entry_time is None or session.finished
-                    or not session.entry_time <= target.time < session.round_end_time):
+                    or not session.first_formal_bar <= target.bar <= session.last_formal_bar):
                 continue
             y = line_y - (target.time - position) / cfg.lookahead_seconds * (line_y - top_y)
             if y < top_y or y > 675:
@@ -384,6 +356,8 @@ class RhythmWindow(arcade.Window):
         return {
             "hits": self.controller.session.hits,
             "misses": self.controller.session.misses,
+            "mistakes": self.controller.session.mistakes,
+            "failed": self.controller.session.failed,
             "underruns": self.controller.engine.underruns,
             "log": str(self.controller.log_path),
         }
