@@ -21,7 +21,7 @@ patterns = [
 
 [judgment]
 window_ms = 100.0                  # 首版试用容差，不是已确认的演出验收值
-max_mistakes = 3                   # 正式游戏累计到此错误数即输掉；0 表示不设上限
+max_mistakes = 3                   # 正式出错四分拍达到此数即输掉；每拍最多计 1，0 不限
 input_offset_ms = 0.0              # 输入延迟补偿：正值从输入时间中减去；与整曲偏移分开
 
 [audio]

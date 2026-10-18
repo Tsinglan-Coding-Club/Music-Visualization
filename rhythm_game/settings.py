@@ -20,7 +20,7 @@ FIELDS = (
     ("beat_start_seconds", "初始拍位置", "秒", .1),
     ("beat_offset_ms", "拍点微调", "ms", 5),
     ("game_bars", "正式游戏长度", "小节", 1),
-    ("max_mistakes", "输掉所需错误数", "次", 1),
+    ("max_mistakes", "输掉所需错误拍数", "拍", 1),
     ("input_offset_ms", "输入补偿", "ms", 5),
     ("window_ms", "判定容差", "ms", 5),
     ("blocksize", "音频缓冲", "帧", 64),
@@ -352,8 +352,8 @@ class SettingsPage:
         w = self.window
         self._field("game_bars", 48, 170, 532)
         self._field("max_mistakes", 654, 170, 532)
-        w._text("game-errors-help", "错误数达到设置值即输掉；0 表示不设上限。漏拍、多拍和错拍都计错。", 48, 282, 18)
-        w._text("game-errors-dedupe", "已经计过漏拍的目标，迟来的补拍不重复扣错；预备小节不计输赢。", 48, 322, 16, MUTED)
+        w._text("game-errors-help", "出错的四分拍累计到上限即输掉；同一拍内最多计 1 次错误，0 表示不设上限。", 48, 282, 18)
+        w._text("game-errors-dedupe", "漏拍、多拍和错拍共享每拍额度；音符漏拍明细仍保留，预备小节不计输赢。", 48, 322, 16, MUTED)
         w._text("game-start-help", "拍手启动 → 等归属小节结束 → 一个完整小节逐拍预备、倒计时 → 正式游戏", 48, 390, 18)
         w._text("game-last-beat-help", "最后一拍的启动归入下一小节；三拍子的第 3 拍、四拍子的第 4 拍同样处理。", 48, 432, 16, MUTED)
         w._text("game-retry-help", "成功或输掉都只结束本次互动，音乐继续；再次拍手可重新开始。", 48, 486, 18)

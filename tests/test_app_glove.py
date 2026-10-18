@@ -7,6 +7,7 @@ from unittest.mock import patch
 from rhythm_game.app import RhythmApp
 from rhythm_game.audio import ClockReading
 from rhythm_game.glove import ContactTransition
+from rhythm_game.glove_input import GloveInput as SerialGloveInput
 from tests.helpers import CONFIG_TEXT, write_config
 from tests.test_app import FakeAudio
 
@@ -79,6 +80,44 @@ class GloveAppTests(unittest.TestCase):
         self.assertEqual(self.app.session.hits, 1)
         self.assertEqual(self.app.session.mistakes, 0)
         self.assertEqual(self.app.engine.claps, 6)
+        self.assertEqual(self.app.expected_generation, generation)
+
+    def test_first_real_protocol_contact_starts_without_any_keyboard_input(self):
+        # 使用真实串口报文解析与去抖，只有串口设备和音频输出是替身。
+        source = self.app.glove
+        serial_input = SerialGloveInput(self.app.config, source.receive, source.record)
+        serial_input._consume(b"READY\n", 100)
+        self.assertEqual(serial_input.status, "ready")
+        self.app.start()
+        generation = self.app.expected_generation
+
+        def packet_clap(host, music, device_ms):
+            self.app.engine.clock = ClockReading(generation, music, True)
+            serial_input._consume(f"1,{device_ms}\n".encode(), host)
+            self.clock.return_value = host + .035
+            serial_input._advance(host + .035)
+            serial_input._consume(f"0,{device_ms + 70}\n".encode(), host + .07)
+            self.clock.return_value = host + .105
+            serial_input._advance(host + .105)
+            self.app.engine.clock = ClockReading(generation, music + .12, True)
+            self.app.update()
+
+        packet_clap(101, 13.2, 1000)
+        self.assertIsNotNone(self.app.session.entry_time)
+        self.assertEqual(self.app.session.first_formal_bar, 1)
+        for i, target in enumerate(self.app.session.preparation_targets):
+            packet_clap(102 + i * 2 / 3, target.time, 2000 + round(i * 2000 / 3))
+        self.assertEqual(self.app.session.prep_hits, 4)
+        self.assertEqual(self.app.session.hits, 0)
+        self.assertIsNone(self.app.session.accuracy)
+        packet_clap(105, self.app.session.entry_time, 5000)
+        self.assertEqual(self.app.session.hits, 1)
+        self.assertEqual(self.app.session.accuracy, 1)
+        self.app.log.flush()
+        claps = [json.loads(line) for line in self.app.log_path.read_text().splitlines()]
+        claps = [r for r in claps if r["event"] == "clap"]
+        self.assertEqual(claps[0]["status"], "trigger")
+        self.assertTrue(all(r["source"] == "glove" for r in claps))
         self.assertEqual(self.app.expected_generation, generation)
 
     def test_confirmation_delay_does_not_turn_in_window_edge_into_miss(self):

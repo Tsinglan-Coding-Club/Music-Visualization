@@ -7,13 +7,14 @@ import sys
 import unittest
 from unittest.mock import Mock, patch
 
+from rhythm_game.core import RhythmChart, RhythmSession
 from rhythm_game.notation import parse_note
 from rhythm_game.staff import Segment, build_staff_layout, clip_segment, draw_staff, layout_bar, note_status
 
 
-def fake_chart(patterns=((4, 8, 8, 4),), beats=3, duration=60):
+def fake_chart(patterns=((4, 8, 8, 4),), beats=3, duration=60, start=4):
     targets = []
-    start, beat_seconds = 4, 0.5
+    beat_seconds = 0.5
     for bar in range(1, 40):
         offset = Fraction()
         for value in patterns[(bar - 1) % len(patterns)]:
@@ -27,6 +28,18 @@ def fake_chart(patterns=((4, 8, 8, 4),), beats=3, duration=60):
                            start=start, beat_seconds=beat_seconds, bar_seconds=beats * beat_seconds,
                            duration_seconds=duration,
                            targets_for_bar=lambda bar: [target for target in targets if target.bar == bar])
+
+
+def projected_session(entry=10, patterns=((8, 16, 16, 4, 4), ("8.", 16, 4, 4))):
+    # 谱面刻意延长到音频末尾，检查布局还会受本轮小节范围约束。
+    score = fake_chart(patterns=patterns, start=entry, duration=60)
+    preparation = tuple(SimpleNamespace(index=i, bar=0, denominator=4, dots=0,
+                                       beat_offset=Fraction(i), time=entry - 1.5 + i * 0.5)
+                        for i in range(3))
+    return SimpleNamespace(score_chart=score, entry_time=entry, round_end_time=entry + 3,
+                           first_formal_bar=1, last_formal_bar=2, finished=False, failed=False,
+                           preparation_start_time=entry - 1.5, preparation_targets=preparation,
+                           preparation_states={}, states={}, window_ms=100)
 
 
 class StaffBeamTests(unittest.TestCase):
@@ -175,6 +188,76 @@ class StaffTimelineTests(unittest.TestCase):
         self.assertIsNone(clip_segment(Segment(5, 0, 5, 10), 20, 80))
 
 
+class StaffProjectedScoreTests(unittest.TestCase):
+    def test_actual_rounds_at_different_music_bars_have_same_local_layout(self):
+        patterns = ((8, 16, 16, 4, 4), ("8.", 16, 4, 4))
+        music = RhythmChart(120, 3, 4, 0, patterns[0], 60, patterns=patterns)
+        layouts = []
+        for trigger in (4.1, 10.1):
+            session = RhythmSession(music, 100, game_bars=2)
+            self.assertTrue(session.try_start(trigger))
+            plan = build_staff_layout(music, session.entry_time, session)
+            layouts.append(plan)
+            self.assertEqual([bar.number for bar in plan.bars if bar.formal], [1, 2])
+            self.assertTrue(any(note.preparation and note.bar == 0 for note in plan.notes))
+            first = next(note for note in plan.notes if not note.preparation)
+            self.assertEqual((first.index, first.bar, first.denominator, first.x), (0, 1, 8, 430))
+            self.assertEqual(len([n for n in plan.notes if not n.preparation]), len(session.formal_targets))
+        self.assertEqual([(n.bar, n.denominator, n.dots, n.x) for n in layouts[0].notes],
+                         [(n.bar, n.denominator, n.dots, n.x) for n in layouts[1].notes])
+
+    def test_each_music_position_restarts_same_score_at_bar_one(self):
+        music = fake_chart(patterns=((4, 4, 4), (16,) * 12))
+        plans = []
+        for entry in (10, 22):
+            session = projected_session(entry)
+            plan = build_staff_layout(music, entry - 1, session)
+            plans.append(plan)
+            self.assertEqual([bar.number for bar in plan.bars if bar.formal], [1, 2])
+            first_bar = [note for note in plan.notes if note.bar == 1]
+            self.assertEqual([note.denominator for note in first_bar], [8, 16, 16, 4, 4])
+            self.assertEqual(first_bar[0].index, 0)
+            self.assertEqual(first_bar[0].x, plan.playhead_x + 240)
+            second_bar = [note for note in plan.notes if note.bar == 2]
+            self.assertEqual([note.denominator for note in second_bar], [8, 16, 4, 4])
+            self.assertEqual(second_bar[0].dots, 1)
+            self.assertTrue(all(note.bar <= 2 for note in plan.notes))
+        shape = lambda plan: [(n.bar, n.denominator, n.dots, n.beat_offset, n.x) for n in plan.notes]
+        self.assertEqual(shape(plans[0]), shape(plans[1]))
+
+    def test_preparation_bar_zero_uses_quarters_before_score_bar_one(self):
+        session = projected_session()
+        plan = build_staff_layout(fake_chart(), 9, session)
+        prep = [note for note in plan.notes if note.preparation]
+        self.assertEqual([(n.bar, n.index, n.denominator) for n in prep], [(0, i, 4) for i in range(3)])
+        self.assertTrue(next(bar for bar in plan.bars if bar.number == 0).preparation)
+        self.assertEqual(prep[0].x, plan.playhead_x - 120)
+        self.assertEqual(next(n for n in plan.notes if n.bar == 1).x - prep[0].x, 360)
+
+    def test_projected_notes_scroll_by_actual_audio_delta(self):
+        session = projected_session()
+        music = fake_chart()
+        first = build_staff_layout(music, 9, session)
+        later = build_staff_layout(music, 9.25, session)
+        by_id = {(note.preparation, note.index): note for note in later.notes}
+        for note in first.notes:
+            shifted = by_id[(note.preparation, note.index)]
+            self.assertAlmostEqual(note.x - shifted.x, 60)
+        self.assertEqual(first.playhead_x, later.playhead_x)
+
+    def test_active_highlight_uses_score_clock_and_local_target_id(self):
+        session = projected_session()
+        music = fake_chart()
+        plan = build_staff_layout(music, 10, session)
+        note = next(n for n in plan.notes if not n.preparation and n.index == 0)
+        self.assertEqual(note_status(note, 10, music, session), "active")
+        session.states[0] = "hit"
+        session.preparation_states[0] = "miss"
+        self.assertEqual(note_status(note, 10, music, session), "hit")
+        preparation = next(n for n in plan.notes if n.preparation and n.index == 0)
+        self.assertEqual(note_status(preparation, 10, music, session), "miss")
+
+
 class StaffVisibilityTests(unittest.TestCase):
     palette = SimpleNamespace(TEXT=(35, 35, 35), MUTED=(105, 105, 105),
                               GREEN=(35, 110, 65), PURPLE=(55, 85, 150), RED=(180, 45, 45))
@@ -197,6 +280,20 @@ class StaffVisibilityTests(unittest.TestCase):
                 arcade.draw_ellipse_filled.assert_not_called()
                 arcade.draw_ellipse_outline.assert_not_called()
                 arcade.draw_polygon_filled.assert_not_called()
+
+    def test_preparation_label_has_no_zero_or_absolute_music_bar_number(self):
+        window = SimpleNamespace(_line=Mock(), _text=Mock(), _circle=Mock(),
+                                 _point=lambda x, y: (x, y), _scale=1)
+        arcade = SimpleNamespace(draw_ellipse_filled=Mock(), draw_ellipse_outline=Mock(),
+                                 draw_polygon_filled=Mock())
+        with patch.dict(sys.modules, {"arcade": arcade, "rhythm_game.app": self.palette}):
+            draw_staff(window, 9, fake_chart(), projected_session())
+        labels = [call.args[1] for call in window._text.call_args_list
+                  if isinstance(call.args[0], tuple) and call.args[0][0] == "staff-bar"]
+        self.assertIn("预备", labels)
+        self.assertIn("1", labels)
+        self.assertNotIn("0", labels)
+        self.assertNotIn("5", labels)
 
     def test_trigger_displays_notes_in_lead_time_and_preparation(self):
         chart = fake_chart()

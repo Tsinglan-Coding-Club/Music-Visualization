@@ -156,7 +156,8 @@ class AppTests(unittest.TestCase):
         self.app.update()
         self.assertTrue(self.app.session.failed)
         self.assertEqual(self.app.session.mistakes, 3)
-        self.assertEqual(self.app.session.misses, 3)
+        self.assertEqual(self.app.session.misses, 4)
+        self.assertEqual(self.app.session.mistake_beats, frozenset({0, 1, 2}))
         self.assertTrue(self.app.desired_playing)
         self.assertEqual(self.app.expected_generation, generation)
         before = dict(self.app.session.states)
@@ -172,14 +173,21 @@ class AppTests(unittest.TestCase):
         outcomes = [json.loads(line) for line in self.app.log_path.read_text().splitlines()]
         self.assertEqual([r["outcome"] for r in outcomes if r["event"] == "round_end"], ["failed"])
 
-    def test_extra_claps_reach_failure_limit_without_restarting_same_input(self):
+    def test_extra_claps_share_one_error_per_quarter_before_failure(self):
         entry = self.trigger()
         self.clap_at(entry)
         for i in range(3):
             self.clap_at(entry + .01 * (i + 1))
+        self.assertFalse(self.app.session.failed)
+        self.assertEqual(self.app.session.mistakes, 1)
+        for beat in (1, 2):
+            time = entry + beat * self.app.chart.beat_seconds
+            self.clap_at(time)
+            self.clap_at(time + .01)
         self.assertTrue(self.app.session.failed)
-        self.assertEqual(self.app.session.hits, 1)
+        self.assertEqual(self.app.session.hits, 3)
         self.assertEqual(self.app.session.mistakes, 3)
+        self.assertEqual(self.app.session.mistake_beats, frozenset({0, 1, 2}))
         self.assertEqual(self.app.session.entry_time, entry)
         self.assertTrue(self.app.desired_playing)
 
@@ -209,7 +217,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(self.app.session.finished)
         self.assertEqual(self.app.session.hits, 20)
         self.assertEqual(self.app.engine.claps, 25)
-        self.assertEqual(self.app.session.first_formal_bar, 3)
+        self.assertEqual(self.app.session.first_formal_bar, 1)
 
     def test_auto_initial_trigger_never_has_negative_raw_time(self):
         text = self.app.config_path.read_text()
@@ -223,7 +231,7 @@ class AppTests(unittest.TestCase):
         self.assertTrue(self.app.session.finished)
         self.assertEqual(self.app.session.hits, 5)
         self.assertEqual(self.app.engine.claps, 10)
-        self.assertEqual(self.app.session.first_formal_bar, 3)
+        self.assertEqual(self.app.session.first_formal_bar, 1)
 
     def test_three_quarter_multibar_dotted_pattern_reaches_actual_judgment(self):
         text = self.app.config_path.read_text()
@@ -246,6 +254,27 @@ class AppTests(unittest.TestCase):
         self.app.clap()
         self.assertFalse(self.app.session.finished)
         self.assertEqual(self.app.session.hits, 0)
+
+    def test_late_round_starts_pattern_one_and_log_uses_round_time(self):
+        text = self.app.config_path.read_text()
+        self.assertTrue(self.app.apply_settings({"note_values": [4, 4, 4, 4],
+                         "patterns": [[4, 4, 4, 4], [8] * 8], "game_bars": 2}, text))
+        entry = self.trigger(13.2)
+        self.assertEqual(self.app.session.first_formal_bar, 1)
+        self.assertEqual([t.denominator for t in self.app.session.formal_targets[:4]], [4] * 4)
+        self.assertTrue(all(t.bar == 1 for t in self.app.session.formal_targets[:4]))
+        for target in self.app.session.preparation_targets:
+            self.clap_at(target.time)
+        self.assertIsNone(self.app.session.accuracy)
+        self.assertEqual(self.app.session.hits, 0)
+        self.clap_at(entry)
+        self.app.update()
+        self.assertEqual(self.app.session.accuracy, 1)
+        self.app.log.flush()
+        rows = [json.loads(line) for line in self.app.log_path.read_text().splitlines()]
+        first = next(r for r in rows if r["event"] == "target")
+        self.assertEqual(first["target_index"], 0)
+        self.assertAlmostEqual(first["target_time"], entry)
 
     def test_stale_generation_ignored_after_restart(self):
         self.app.start()

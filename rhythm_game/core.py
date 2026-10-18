@@ -105,6 +105,9 @@ class RhythmChart:
         bar_extent = (self.duration_seconds - self.start) / self.bar_seconds
         if not math.isfinite(bar_extent):
             raise ValueError("BPM 与音频时长产生了不可表示的小节数")
+        nearest_extent = round(bar_extent)
+        if nearest_extent >= 1 and math.isclose(bar_extent, nearest_extent, rel_tol=0, abs_tol=_EPSILON):
+            bar_extent = nearest_extent
         bar_count = math.ceil(bar_extent)
         self.targets: list[Target] = []
         self._bar_ranges: dict[int, tuple[int, int]] = {}
@@ -197,17 +200,20 @@ class RhythmSession:
         self.preparation_start_time: float | None = None
         self.round_end_time: float | None = None
         self.attributed_bar: int | None = None
+        self.score_chart: RhythmChart | None = None
         self.states: dict[int, str] = {}
         self.preparation_states: dict[int, str] = {}
         self.preparation_targets: tuple[Target, ...] = ()
         self._preparation_times: tuple[float, ...] = ()
-        self._entry_index = self._end_index = len(self.chart.targets)
+        self._entry_index = self._end_index = 0
         self._miss_cursor = self._entry_index
         self._prep_cursor = 0
         self._armed_at: float | None = None
         self._last_input: float | None = None
         self._advanced_time: float | None = None
         self._hits = self._misses = self._mistakes = 0
+        self._mistake_beats: set[int] = set()
+        self._formal_beat_count = 0
         self.failed = False
         self.failure_reason: str | None = None
         self.failure_time: float | None = None
@@ -217,11 +223,21 @@ class RhythmSession:
     def _enter(self, entry_bar: int, armed_at: float, *, trigger_time: float | None = None,
                attributed_bar: int | None = None, preparation_start: float | None = None) -> None:
         self.reset()
-        self._entry_index = self.chart._bar_ranges[entry_bar][0]
         self.entry_time = self.chart._downbeat_times[entry_bar - 1]
         self.round_end_time = min(self.entry_time + self.game_bars * self.chart.bar_seconds,
                                   self.chart.duration_seconds)
-        self._end_index = bisect_left(self.chart._times, self.round_end_time - _EPSILON)
+        # 音乐只提供绝对拍钟；每轮正式谱从第一个模板重新开始。
+        self.score_chart = RhythmChart(
+            self.chart.bpm, self.chart.beats_per_bar, self.entry_time, 0,
+            self.chart.note_values, self.round_end_time, patterns=self.chart.patterns,
+        )
+        self._entry_index = 0
+        self._end_index = len(self.score_chart.targets)
+        beat_extent = (self.round_end_time - self.entry_time) / self.chart.beat_seconds
+        nearest_extent = round(beat_extent)
+        if math.isclose(beat_extent, nearest_extent, rel_tol=0, abs_tol=_EPSILON):
+            beat_extent = nearest_extent
+        self._formal_beat_count = max(1, math.ceil(beat_extent))
         self.trigger_time = self.entry_time if trigger_time is None else trigger_time
         self.attributed_bar = attributed_bar
         self.preparation_start_time = preparation_start
@@ -230,7 +246,7 @@ class RhythmSession:
         if preparation_start is not None:
             self.preparation_targets = tuple(
                 Target(beat, preparation_start + beat * self.chart.beat_seconds, 4,
-                       entry_bar - 1, 0, Fraction(beat), Fraction(1))
+                       0, 0, Fraction(beat), Fraction(1))
                 for beat in range(self.chart.beats_per_bar)
             )
             self._preparation_times = tuple(t.time for t in self.preparation_targets)
@@ -278,16 +294,16 @@ class RhythmSession:
     @property
     def formal_targets(self) -> tuple[Target, ...]:
         """本轮正式目标的准确切片，避免用浮点结束时刻重新筛选。"""
-        return tuple(self.chart.targets[self._entry_index:self._end_index])
+        return tuple(self.score_chart.targets) if self.score_chart is not None else ()
 
     @property
     def first_formal_bar(self) -> int | None:
-        return (self.chart.targets[self._entry_index].bar
+        return (self.score_chart.targets[self._entry_index].bar
                 if self._entry_index < self._end_index else None)
 
     @property
     def last_formal_bar(self) -> int | None:
-        return (self.chart.targets[self._end_index - 1].bar
+        return (self.score_chart.targets[self._end_index - 1].bar
                 if self._entry_index < self._end_index else None)
 
     @property
@@ -301,6 +317,17 @@ class RhythmSession:
     @property
     def mistakes(self) -> int:
         return self._mistakes
+
+    @property
+    def mistake_beats(self) -> frozenset[int]:
+        """已记错的正式四分拍，按本轮从 0 编号；同一拍至多记一次错。"""
+        return frozenset(self._mistake_beats)
+
+    @property
+    def accuracy(self) -> float | None:
+        """正式命中数 /（命中数 + 错误拍数）；无正式结果时返回 None。"""
+        attempts = self._hits + self._mistakes
+        return self._hits / attempts if attempts else None
 
     @property
     def prep_hits(self) -> int:
@@ -341,7 +368,16 @@ class RhythmSession:
         earlier, later = targets[insertion - 1], targets[insertion]
         return later if later.time - time < time - earlier.time - _EPSILON else earlier
 
-    def _mistake(self, reason: str, music_time: float) -> None:
+    def _mistake(self, reason: str, music_time: float, *, beat_time: float) -> None:
+        # 结算时刻用于失败记录，归属拍则使用漏拍起音或校正后的实际输入。
+        position = (beat_time - self.entry_time) / self.chart.beat_seconds
+        nearest = round(position)
+        if math.isclose(position, nearest, rel_tol=0, abs_tol=_EPSILON):
+            position = nearest
+        beat = min(max(0, math.floor(position)), self._formal_beat_count - 1)
+        if beat in self._mistake_beats:
+            return
+        self._mistake_beats.add(beat)
         self._mistakes += 1
         if self.max_mistakes and self._mistakes >= self.max_mistakes:
             self.failed = True
@@ -361,7 +397,12 @@ class RhythmSession:
         corrected = music_time - self._offset
         if self.preparation_start_time is not None and music_time == self._armed_at:
             return Judgment("waiting", None, None)
-        if corrected < self.entry_time - self._window - _EPSILON:
+        before_formal_window = corrected < self.entry_time - self._window - _EPSILON
+        in_final_preparation_window = (
+            self.preparation_targets and corrected < self.entry_time - _EPSILON
+            and corrected <= self.preparation_targets[-1].time + self._window + _EPSILON
+        )
+        if before_formal_window or in_final_preparation_window:
             if self.preparation_start_time is None or corrected < self.preparation_start_time - self._window - _EPSILON:
                 return Judgment("waiting", None, None)
             target = self._nearest(self.preparation_targets, self._preparation_times, corrected)
@@ -378,7 +419,7 @@ class RhythmSession:
         self._settle_formal(corrected - self._window, self._offset)
         if self.failed:
             return Judgment("failed", None, None)
-        target = self._nearest(self.chart.targets, self.chart._times, corrected,
+        target = self._nearest(self.score_chart.targets, self.score_chart._times, corrected,
                                self._entry_index, self._end_index)
         error = corrected - target.time
         state = self.states.get(target.index)
@@ -390,12 +431,12 @@ class RhythmSession:
             if status == "late" and state is None:
                 self.states[target.index] = "miss"
                 self._misses += 1
-                self._mistake("miss", music_time)
+                self._mistake("miss", music_time, beat_time=target.time)
             else:
-                self._mistake(status, music_time)
+                self._mistake(status, music_time, beat_time=corrected)
             return Judgment(status, target, error * 1000)
         if state == "hit":
-            self._mistake("duplicate", music_time)
+            self._mistake("duplicate", music_time, beat_time=corrected)
             return Judgment("duplicate", target, error * 1000)
         self.states[target.index] = "hit"
         self._hits += 1
@@ -403,14 +444,15 @@ class RhythmSession:
 
     def _settle_formal(self, before: float, failure_offset: float) -> None:
         while self._miss_cursor < self._end_index:
-            target = self.chart.targets[self._miss_cursor]
+            target = self.score_chart.targets[self._miss_cursor]
             if before <= target.time + _EPSILON:
                 break
             self._miss_cursor += 1
             if target.index not in self.states:
                 self.states[target.index] = "miss"
                 self._misses += 1
-                self._mistake("miss", target.time + self._window + failure_offset)
+                self._mistake("miss", target.time + self._window + failure_offset,
+                              beat_time=target.time)
                 if self.failed:
                     return
 

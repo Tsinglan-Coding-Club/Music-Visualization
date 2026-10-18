@@ -170,11 +170,13 @@ class SessionTests(unittest.TestCase):
         for request, expected_bar in [(4.1, 2), (9.4, 4)]:
             entry = game.arm(request)
             target = game.judge(entry).target
-            self.assertEqual(target.bar, expected_bar)
+            self.assertEqual(game.chart.bar_at(entry)[0], expected_bar)
+            self.assertEqual(target.bar, 1)
+            self.assertEqual(target.index, 0)
             self.assertEqual(game.hits, 1)
             game.advance(entry + 0.2)
             self.assertEqual(game.misses, 0)
-            self.assertTrue(all(game.chart.targets[i].bar >= expected_bar for i in game.states))
+            self.assertEqual(game.states, {0: "hit"})
 
     def test_repeated_early_and_late_input_does_not_shift_targets(self):
         for error in [-0.075, 0.075]:
@@ -313,7 +315,7 @@ class SessionTests(unittest.TestCase):
     def test_advance_after_eof_finishes_only_one_bar(self):
         game = self.session()
         entry = game.arm(4.1)
-        expected = sum(entry <= t.time < game.round_end_time for t in game.chart.targets)
+        expected = len(game.formal_targets)
         game.advance(100)
         self.assertTrue(game.finished)
         self.assertEqual(game.misses, expected)
@@ -381,7 +383,7 @@ class SessionTests(unittest.TestCase):
         game.try_start(4.08)
         result = game.judge(game.entry_time - 0.125 + 0.08)
         self.assertEqual(result.status, "hit")
-        self.assertEqual(result.target.bar, 3)
+        self.assertEqual(result.target.bar, 1)
         self.assertAlmostEqual(result.error_ms, -125)
         self.assertEqual(game.hits, 1)
         self.assertEqual(game.prep_hits, 0)
@@ -391,8 +393,8 @@ class SessionTests(unittest.TestCase):
                       duration_seconds=40)
         game = RhythmSession(score, 60, game_bars=3)
         self.assertTrue(game.try_start(4.25))
-        expected = [target for target in score.targets if 3 <= target.bar <= 5]
-        self.assertEqual([len(score.targets_for_bar(bar)) for bar in [3, 4, 5]], [16, 4, 8])
+        expected = game.formal_targets
+        self.assertEqual([len(game.score_chart.targets_for_bar(bar)) for bar in [1, 2, 3]], [4, 8, 16])
         for target in expected:
             self.assertEqual(game.judge(target.time).status, "hit")
         self.assertEqual(game.hits, 28)
@@ -411,17 +413,99 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(game.first_formal_bar)
         self.assertIsNone(game.last_formal_bar)
         game.try_start(4)
-        self.assertEqual((game.first_formal_bar, game.last_formal_bar), (3, 6))
+        self.assertEqual((game.first_formal_bar, game.last_formal_bar), (1, 4))
         self.assertEqual(len(game.formal_targets), 40)
-        self.assertEqual(game.formal_targets, tuple(target for bar in range(3, 7)
-                                                 for target in score.targets_for_bar(bar)))
+        self.assertEqual(game.formal_targets, tuple(target for bar in range(1, 5)
+                                                 for target in game.score_chart.targets_for_bar(bar)))
         # Floating end arithmetic is slightly later than bar 7's exact onset.
         self.assertLess(score.targets_for_bar(7)[0].time, game.round_end_time)
-        self.assertNotIn(score.targets_for_bar(7)[0], game.formal_targets)
+        self.assertTrue(all(target.time < game.round_end_time - 1e-12 for target in game.formal_targets))
+        self.assertEqual(set(t.bar for t in game.score_chart.targets), {1, 2, 3, 4})
         game.reset()
         self.assertEqual(game.formal_targets, ())
         self.assertIsNone(game.first_formal_bar)
         self.assertIsNone(game.last_formal_bar)
+
+    def test_late_trigger_and_every_retry_reset_score_to_first_pattern(self):
+        clock = chart(bpm=60, patterns=[[4] * 4, [8] * 8, [16] * 16], duration_seconds=80)
+        game = RhythmSession(clock, 100, game_bars=2, max_mistakes=1)
+        trigger = 12.5
+        for _ in range(3):
+            self.assertTrue(game.try_start(trigger))
+            self.assertIs(game.chart, clock)
+            self.assertEqual(game.chart.start, 4)
+            self.assertEqual(game.score_chart.start, game.entry_time)
+            self.assertEqual(game.score_chart.duration_seconds, game.round_end_time)
+            self.assertEqual(game.score_chart.patterns, clock.patterns)
+            self.assertEqual((game.first_formal_bar, game.last_formal_bar), (1, 2))
+            self.assertEqual([len(game.score_chart.targets_for_bar(bar)) for bar in [1, 2]], [4, 8])
+            self.assertEqual([target.index for target in game.formal_targets], list(range(12)))
+            self.assertTrue(all(target.bar == 0 for target in game.preparation_targets))
+            game.advance(game.entry_time + .2)
+            self.assertTrue(game.failed)
+            self.assertEqual(game.states, {0: "miss"})
+            trigger = game.entry_time + .3
+        game.reset()
+        self.assertIsNone(game.score_chart)
+        self.assertEqual(game.formal_targets, ())
+        self.assertIsNone(game.accuracy)
+
+    def test_arm_uses_first_pattern_independent_of_music_bar(self):
+        clock = chart(bpm=60, patterns=[[4] * 4, [16] * 16], duration_seconds=60)
+        game = RhythmSession(clock, 100, game_bars=2)
+        self.assertEqual(game.arm(7), 8)
+        self.assertEqual(len(game.score_chart.targets_for_bar(1)), 4)
+        self.assertEqual(game.judge(8).target, game.score_chart.targets[0])
+        self.assertEqual(game.judge(8).target.bar, 1)
+        self.assertEqual(game.score_chart.start, 8)
+
+    def test_accuracy_excludes_preparation_hits_misses_and_duplicates(self):
+        game = self.session()
+        self.assertIsNone(game.accuracy)
+        game.try_start(4)
+        for target in game.preparation_targets[:3]:
+            self.assertEqual(game.judge(target.time).status, "preparation_hit")
+            self.assertEqual(game.judge(target.time + .01).status, "preparation_duplicate")
+        game.advance(game.entry_time)
+        self.assertEqual((game.prep_hits, game.prep_misses), (3, 1))
+        self.assertEqual((game.hits, game.mistakes), (0, 0))
+        self.assertIsNone(game.accuracy)
+        game.judge(game.entry_time)
+        self.assertEqual(game.accuracy, 1)
+        game.judge(game.entry_time + .01)
+        self.assertEqual(game.accuracy, .5)
+        game.advance(game.formal_targets[1].time + .126)
+        self.assertAlmostEqual(game.accuracy, 1 / 3)
+        self.assertEqual((game.hits, game.misses, game.mistakes), (1, 1, 2))
+
+    def test_wide_window_cannot_steal_final_preparation_beat_or_duplicates(self):
+        clock = chart(bpm=600, note_values=[4] * 4, duration_seconds=60)
+        game = RhythmSession(clock, 150)
+        game.try_start(4)
+        last_prep = game.preparation_targets[-1]
+        self.assertLess(game.entry_time - last_prep.time, game.window_ms / 1000)
+        self.assertEqual(game.judge(last_prep.time).status, "preparation_hit")
+        self.assertEqual(game.judge(last_prep.time + .01).status, "preparation_duplicate")
+        self.assertEqual((game.hits, game.mistakes), (0, 0))
+        self.assertIsNone(game.accuracy)
+        self.assertEqual(game.judge(game.entry_time).status, "hit")
+        self.assertEqual(game.accuracy, 1)
+
+    def test_formal_early_overlap_starts_only_after_final_preparation_window(self):
+        game = self.session(window_ms=400)
+        game.try_start(4)
+        last_prep = game.preparation_targets[-1]
+        deadline = last_prep.time + .4
+        self.assertGreater(deadline, game.entry_time - .4)
+        self.assertLess(deadline, game.entry_time)
+        self.assertEqual(game.judge(last_prep.time).status, "preparation_hit")
+        self.assertEqual(game.judge(deadline).status, "preparation_duplicate")
+        self.assertIsNone(game.accuracy)
+        result = game.judge(deadline + .000001)
+        self.assertEqual(result.status, "hit")
+        self.assertEqual(result.target.index, 0)
+        self.assertEqual(result.target.bar, 1)
+        self.assertEqual(game.accuracy, 1)
 
     def test_formal_failure_freezes_on_first_threshold_miss_and_can_retry(self):
         game = RhythmSession(chart(duration_seconds=40), 125, game_bars=3, max_mistakes=2)
@@ -431,7 +515,7 @@ class SessionTests(unittest.TestCase):
         game.advance(game.entry_time + 1.5)
         self.assertTrue(game.failed)
         self.assertTrue(game.finished)
-        self.assertEqual((game.hits, game.misses, game.mistakes), (1, 2, 2))
+        self.assertEqual((game.hits, game.misses, game.mistakes), (1, 3, 2))
         self.assertEqual(game.failure_reason, "miss")
         self.assertEqual(game.phase_at(game.entry_time), "failed")
         saved = dict(game.states)
@@ -453,12 +537,17 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(game.judge(4.01).status, "duplicate")
         self.assertEqual(game.mistakes, 1)
         self.assertEqual(game.judge(4.4).status, "early")
+        self.assertEqual(game.mistakes, 1)
+        self.assertFalse(game.failed)
+        second = game.formal_targets[1]
+        self.assertEqual(game.judge(second.time).status, "hit")
+        self.assertEqual(game.judge(second.time + .01).status, "duplicate")
         self.assertEqual(game.mistakes, 2)
         self.assertTrue(game.failed)
-        self.assertEqual(game.failure_reason, "early")
-        self.assertEqual(game.hits, 1)
-        self.assertEqual(game.judge(4.6666666667).status, "failed")
-        self.assertEqual(game.hits, 1)
+        self.assertEqual(game.failure_reason, "duplicate")
+        self.assertEqual(game.hits, 2)
+        self.assertEqual(game.judge(second.time + .02).status, "failed")
+        self.assertEqual(game.hits, 2)
 
     def test_late_supplement_of_missed_target_never_double_counts(self):
         game = self.session(max_mistakes=3)
@@ -488,12 +577,13 @@ class SessionTests(unittest.TestCase):
         game = RhythmSession(score, 10, max_mistakes=3)
         game.arm(3)
         game.advance(100)
-        self.assertEqual((game.misses, game.mistakes), (3, 3))
-        self.assertEqual(set(game.states), {0, 1, 2})
-        self.assertAlmostEqual(game.failure_time, 4.06)
+        self.assertEqual((game.misses, game.mistakes), (9, 3))
+        self.assertEqual(set(game.states), set(range(9)))
+        self.assertEqual(game.mistake_beats, frozenset({0, 1, 2}))
+        self.assertAlmostEqual(game.failure_time, 4.21)
         # A future input must settle earlier misses before it can score.
         game.arm(3)
-        self.assertEqual(game.judge(4.2).status, "failed")
+        self.assertEqual(game.judge(4.22).status, "failed")
         self.assertEqual(game.hits, 0)
 
     def test_unlimited_errors_and_round_end_wait_for_positive_offset(self):
@@ -505,7 +595,134 @@ class SessionTests(unittest.TestCase):
         game.advance(game.round_end_time + 0.08)
         self.assertTrue(game.finished)
         self.assertEqual(game.misses, 5)
-        self.assertEqual(game.mistakes, 5)
+        self.assertEqual(game.mistakes, 4)
+
+    def test_rapid_duplicate_contacts_share_one_quarter_beat_error(self):
+        game = RhythmSession(chart(bpm=60, note_values=[1]), 100, max_mistakes=2)
+        game.arm(3)
+        self.assertEqual(game.judge(4).status, "hit")
+        for time in [4.001, 4.002, 4.003, 4.01, 4.02, 4.099]:
+            self.assertEqual(game.judge(time).status, "duplicate")
+        self.assertEqual((game.hits, game.mistakes), (1, 1))
+        self.assertEqual(game.mistake_beats, frozenset({0}))
+        self.assertFalse(game.failed)
+        self.assertEqual(game.accuracy, .5)
+        frozen = game.mistake_beats
+        with self.assertRaises(AttributeError):
+            frozen.add(1)
+        self.assertEqual(game.mistake_beats, frozenset({0}))
+
+    def test_four_sixteenth_misses_are_one_error_then_next_quarter_has_new_budget(self):
+        game = RhythmSession(chart(bpm=60, note_values=[16] * 16), 50, max_mistakes=3)
+        game.arm(3)
+        game.advance(4.800001)
+        self.assertEqual((game.misses, game.mistakes), (4, 1))
+        self.assertEqual(game.states, {index: "miss" for index in range(4)})
+        self.assertEqual(game.mistake_beats, frozenset({0}))
+        self.assertFalse(game.failed)
+        game.advance(5.300001)
+        self.assertEqual((game.misses, game.mistakes), (6, 2))
+        self.assertEqual(game.mistake_beats, frozenset({0, 1}))
+        self.assertFalse(game.failed)
+
+    def test_miss_duplicate_early_and_late_causes_share_the_same_beat_cap(self):
+        game = RhythmSession(chart(bpm=60, note_values=[16] * 16), 50, max_mistakes=2)
+        game.arm(3)
+        self.assertEqual(game.judge(4).status, "hit")
+        self.assertEqual(game.judge(4.01).status, "duplicate")
+        self.assertEqual(game.judge(4.1).status, "late")
+        game.advance(4.800001)
+        self.assertEqual(game.judge(4.9).status, "early")
+        self.assertEqual((game.hits, game.misses, game.mistakes), (1, 3, 1))
+        self.assertEqual(game.mistake_beats, frozenset({0}))
+        self.assertFalse(game.failed)
+        game.advance(5.050001)
+        self.assertTrue(game.failed)
+        self.assertEqual((game.misses, game.mistakes), (4, 2))
+        self.assertEqual(game.mistake_beats, frozenset({0, 1}))
+        self.assertAlmostEqual(game.failure_time, 5.05)
+
+    def test_miss_uses_target_quarter_even_when_deadline_crosses_to_next_beat(self):
+        game = RhythmSession(chart(bpm=60, note_values=[16] * 16), 300, max_mistakes=2)
+        game.arm(3)
+        game.advance(5.1)
+        self.assertEqual((game.misses, game.mistakes), (4, 1))
+        self.assertEqual(game.mistake_beats, frozenset({0}))
+        self.assertFalse(game.failed)
+        game.advance(5.300001)
+        self.assertEqual((game.misses, game.mistakes), (5, 2))
+        self.assertTrue(game.failed)
+        self.assertAlmostEqual(game.failure_time, 5.3)
+
+    def test_exact_quarter_boundary_reopens_error_budget_with_float_bpm(self):
+        game = RhythmSession(chart(bpm=127, note_values=[1]), 10)
+        game.arm(3)
+        first = game.entry_time
+        boundary = first + game.chart.beat_seconds
+        game.judge(first)
+        self.assertEqual(game.judge(boundary - .000001).status, "late")
+        self.assertEqual(game.mistake_beats, frozenset({0}))
+        self.assertEqual(game.judge(boundary).status, "late")
+        self.assertEqual(game.mistake_beats, frozenset({0, 1}))
+        self.assertEqual(game.mistakes, 2)
+
+    def test_compensated_early_first_window_and_negative_offset_use_local_beat(self):
+        game = RhythmSession(chart(bpm=60, note_values=[1]), 125, input_offset_ms=-50)
+        game.arm(3)
+        self.assertEqual(game.judge(3.85).status, "hit")
+        self.assertEqual(game.judge(3.86).status, "duplicate")
+        self.assertEqual(game.mistake_beats, frozenset({0}))
+        self.assertEqual(game.judge(4.949999).status, "late")
+        self.assertEqual(game.mistakes, 1)
+        self.assertEqual(game.judge(4.95).status, "late")
+        self.assertEqual(game.mistakes, 2)
+        self.assertEqual(game.mistake_beats, frozenset({0, 1}))
+
+    def test_extra_input_after_round_end_clamps_to_last_actual_quarter(self):
+        game = RhythmSession(chart(bpm=60, note_values=[1]), 100)
+        game.arm(3)
+        game.judge(4)
+        self.assertEqual(game.judge(8).status, "late")
+        self.assertEqual(game.judge(9).status, "late")
+        self.assertEqual(game.mistake_beats, frozenset({3}))
+        self.assertEqual(game.mistakes, 1)
+        truncated = RhythmSession(chart(bpm=60, note_values=[1], duration_seconds=5.1), 100)
+        truncated.arm(3)
+        truncated.judge(4)
+        truncated.judge(10)
+        self.assertEqual(truncated.mistake_beats, frozenset({1}))
+
+    def test_retry_and_reset_clear_counted_beat_errors(self):
+        game = RhythmSession(chart(bpm=60, note_values=[4] * 4, duration_seconds=80), 100,
+                             max_mistakes=1)
+        trigger = 4
+        for _ in range(2):
+            self.assertTrue(game.try_start(trigger))
+            self.assertEqual(game.mistake_beats, frozenset())
+            game.judge(game.entry_time)
+            game.judge(game.entry_time + .01)
+            self.assertTrue(game.failed)
+            self.assertEqual(game.mistakes, 1)
+            self.assertEqual(game.mistake_beats, frozenset({0}))
+            trigger = game.entry_time + .2
+        game.reset()
+        self.assertEqual(game.mistakes, 0)
+        self.assertEqual(game.mistake_beats, frozenset())
+
+    def test_preparation_contacts_and_misses_never_use_formal_beat_error_budget(self):
+        game = RhythmSession(chart(bpm=60, note_values=[16] * 16), 50, max_mistakes=1)
+        game.try_start(4)
+        first = game.preparation_targets[0]
+        game.judge(first.time)
+        for delta in [.001, .002, .003, .004]:
+            self.assertEqual(game.judge(first.time + delta).status, "preparation_duplicate")
+        game.advance(game.entry_time)
+        self.assertEqual((game.prep_hits, game.prep_misses), (1, 3))
+        self.assertEqual(game.mistake_beats, frozenset())
+        self.assertEqual(game.mistakes, 0)
+        self.assertFalse(game.failed)
+        self.assertEqual(game.judge(game.entry_time).status, "hit")
+        self.assertIsNotNone(game.accuracy)
 
     def test_eof_rejects_incomplete_real_round_and_preserves_results(self):
         # Trigger bar + preparation bar + two formal bars exactly fit.

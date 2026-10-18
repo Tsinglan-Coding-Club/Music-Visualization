@@ -190,9 +190,12 @@ def build_staff_layout(chart, position: float, session=None, *, left: float = ST
                        right: float = STAFF_RIGHT, playhead_x: float = PLAYHEAD_X,
                        pixels_per_beat: float | None = None,
                        show_notes: bool = True) -> StaffLayout:
-    """按音乐时钟布局多小节；show_notes=False 时只保留空谱面所需尺寸。"""
+    """音乐时钟驱动本轮谱面坐标；预备为第 0 小节，正式谱面从第 1 小节开始。"""
     if not math.isfinite(position):
         raise ValueError("音乐位置须为有限数值")
+    score_chart = getattr(session, "score_chart", None)
+    if score_chart is not None:
+        chart = score_chart
     patterns = getattr(chart, "patterns", (chart.note_values,))
     if pixels_per_beat is None:
         shortest = min(parse_note(value).beats for pattern in patterns for value in pattern)
@@ -201,18 +204,21 @@ def build_staff_layout(chart, position: float, session=None, *, left: float = ST
         raise ValueError("谱面视口与每拍宽度无效")
     if not show_notes:
         return StaffLayout((), (), (), pixels_per_beat, left, right, playhead_x)
-    clock_beat = (position - chart.start) / chart.beat_seconds
-    first_beat = clock_beat + (left - playhead_x - 30) / pixels_per_beat
-    last_beat = clock_beat + (right - playhead_x + 30) / pixels_per_beat
-    first_bar = max(1, math.floor(first_beat / chart.beats_per_bar) + 1)
-    last_bar = min(math.ceil((chart.duration_seconds - chart.start) / chart.bar_seconds),
-                   math.floor(last_beat / chart.beats_per_bar) + 1)
-    inputs = []
-    bars = []
     preparation_targets = getattr(session, "preparation_targets", ())
     preparation_by_bar = {}
     for target in preparation_targets:
         preparation_by_bar.setdefault(target.bar, []).append(target)
+    clock_beat = (position - chart.start) / chart.beat_seconds
+    first_beat = clock_beat + (left - playhead_x - 30) / pixels_per_beat
+    last_beat = clock_beat + (right - playhead_x + 30) / pixels_per_beat
+    minimum_bar = min((1, *preparation_by_bar))
+    maximum_bar = math.ceil((chart.duration_seconds - chart.start) / chart.bar_seconds)
+    if score_chart is not None:
+        maximum_bar = min(maximum_bar, session.last_formal_bar or 0)
+    first_bar = max(minimum_bar, math.floor(first_beat / chart.beats_per_bar) + 1)
+    last_bar = min(maximum_bar, math.floor(last_beat / chart.beats_per_bar) + 1)
+    inputs = []
+    bars = []
     for bar in range(first_bar, last_bar + 1):
         beat = (bar - 1) * chart.beats_per_bar
         x = playhead_x + (beat - clock_beat) * pixels_per_beat
@@ -274,6 +280,7 @@ def _beat_label(offset: Fraction) -> str:
 
 def note_status(note: NotePlan, position: float, chart, session) -> str | None:
     """准备拍使用独立目标号与成绩，不与正式谱面的目标号混用。"""
+    chart = getattr(session, "score_chart", None) or chart
     states = getattr(session, "preparation_states", {}) if note.preparation else session.states
     state = states.get(note.index)
     if state is not None:
@@ -315,7 +322,7 @@ def draw_staff(window, position, chart, session):
             line(Segment(bar.x, 197, bar.end_x, 197), PURPLE, 2)
         line(Segment(bar.x, 226, bar.x, 284), MUTED, 1)
         if left + 18 <= bar.x <= right - 50:
-            window._text(("staff-bar", bar.number % 32), f"{bar.number}" + (" 预备" if bar.preparation else ""),
+            window._text(("staff-bar", bar.number % 32), "预备" if bar.preparation else str(bar.number),
                          bar.x + 3, 177, 13, PURPLE if bar.formal or bar.preparation else MUTED)
     if layout.bars:
         line(Segment(layout.bars[-1].end_x, 226, layout.bars[-1].end_x, 284), MUTED, 1)

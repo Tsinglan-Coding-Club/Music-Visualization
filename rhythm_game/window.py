@@ -13,6 +13,7 @@ import arcade
 from .app import BG, PANEL, LINE, TEXT, MUTED, GREEN, PURPLE, RED
 from .settings import SettingsPage
 from .staff import draw_staff
+from .presentation import preparation_indicator
 
 
 DESIGN_WIDTH = 1280
@@ -204,40 +205,53 @@ class RhythmWindow(arcade.Window):
         elif phase == "lead_in":
             self._text("feedback", "已启动 · 等待预备小节", 64, 110, 26, PURPLE)
         elif phase == "preparing":
-            beats_left = max(1, math.ceil((session.entry_time - position) / app.chart.beat_seconds - 1e-9))
-            self._text("feedback", f"预备 · {beats_left}", 64, 106, 32, PURPLE)
-            self._text("preparation-hint", "每拍拍手", 64, 152, 16, MUTED)
-            for beat_index, target in enumerate(session.preparation_targets):
-                state = session.preparation_states.get(beat_index)
-                x = 470 + beat_index * min(50, 420 / max(1, cfg.beats_per_bar - 1))
-                self._circle(x, 132, 8, GREEN if state == "hit" else LINE)
-                self._text(("preparation-beat", beat_index), beat_index + 1, x, 150, 14, MUTED, anchor_x="center")
+            indicator = preparation_indicator(session, position)
+            self._text("feedback", "每拍一下做预备", 64, 110, 24, PURPLE)
+            self._text("preparation-hint", "预备不计成绩", 64, 151, 16, MUTED)
+            self._text("preparation-countdown", f"预备 · {indicator.remaining}", 640, 92, 36,
+                       PURPLE, anchor_x="center")
+            spacing = min(54, 420 / max(1, cfg.beats_per_bar - 1))
+            for beat_index, state in enumerate(indicator.lights):
+                x = 640 + (beat_index - (cfg.beats_per_bar - 1) / 2) * spacing
+                current = state in ("current", "current_hit")
+                self._circle(x, 150, 14, PURPLE if current else LINE)
+                if state in ("hit", "current_hit"):
+                    self._circle(x, 150, 10, GREEN)
+                self._text(("preparation-beat", beat_index), cfg.beats_per_bar - beat_index,
+                           x, 141, 15, BG if current or state == "hit" else MUTED, anchor_x="center")
         else:
             feedback = "开始" if title in ("已启动", "预备拍命中", "跟拍预备", "等待预备") else title
             self._text("feedback", feedback, 64, 110, 26, color)
             formal_bar = min(cfg.game_bars, max(1, int((position - session.entry_time) / app.chart.bar_seconds) + 1))
             self._text("game-bar", f"游戏 {formal_bar} / {cfg.game_bars} 小节", 64, 154, 16, MUTED)
-        if session.entry_time is not None:
+        if session.entry_time is not None and phase in ("playing", "failed", "completed"):
             self._text("score", f"命中 {session.hits}   漏拍 {session.misses}",
                        1216, 108, 17, MUTED, anchor_x="right")
             limit = str(cfg.max_mistakes) if cfg.max_mistakes else "∞"
-            self._text("mistakes", f"错误 {session.mistakes} / {limit}",
+            accuracy = f"{session.accuracy:.0%}" if session.accuracy is not None else "—"
+            self._text("mistakes", f"错误拍 {session.mistakes} / {limit} · 正确率 {accuracy}",
                        1216, 143, 17, RED if session.failed else MUTED, anchor_x="right")
+
+        if app.glove is not None and app.glove.status != "ready":
+            glove_status = {"waiting_release": "手套未就绪：请接好并松开手套，必要时点设置重连",
+                            "connecting": "手套连接中", "disconnected": "手套未连接",
+                            "error": "手套连接异常", "delayed": "手套信号延迟，请重连"}
+            self._text("glove-not-ready", glove_status.get(app.glove.status, "手套未就绪"),
+                       640, 689, 15, RED, anchor_x="center")
 
         self._staff(position, bar)
         line_y, top_y = 650, 340
         for x in (480, 800):
             self._line(x, top_y, x, line_y, (225, 225, 225))
-        for target in app.chart.visible_targets(position, cfg.lookahead_seconds, 0.25):
-            if (session.entry_time is None or session.finished
-                    or not session.first_formal_bar <= target.bar <= session.last_formal_bar):
-                continue
-            y = line_y - (target.time - position) / cfg.lookahead_seconds * (line_y - top_y)
-            if y < top_y or y > 675:
-                continue
-            state = session.states.get(target.index)
-            color = GREEN if state == "hit" else RED if state == "miss" else PURPLE
-            self._line(585, y, 695, y, color, 5)
+        score_chart = session.score_chart
+        if score_chart is not None and not session.finished:
+            for target in score_chart.visible_targets(position, cfg.lookahead_seconds, 0.25):
+                y = line_y - (target.time - position) / cfg.lookahead_seconds * (line_y - top_y)
+                if y < top_y or y > 675:
+                    continue
+                state = session.states.get(target.index)
+                color = GREEN if state == "hit" else RED if state == "miss" else PURPLE
+                self._line(585, y, 695, y, color, 5)
         self._line(450, line_y, 830, line_y, GREEN, 3)
         self._line(64, 714, 1216, 714, LINE)
         for index, (rect, label, action, primary) in enumerate(self._game_buttons()):
@@ -357,6 +371,7 @@ class RhythmWindow(arcade.Window):
             "misses": self.controller.session.misses,
             "mistakes": self.controller.session.mistakes,
             "failed": self.controller.session.failed,
+            "accuracy": self.controller.session.accuracy,
             "underruns": self.controller.engine.underruns,
             "log": str(self.controller.log_path),
         }

@@ -280,7 +280,8 @@ class RhythmApp:
                     corrected_time=position - self.config.input_offset_ms / 1000,
                     target_index=result.target.index if result.target else None,
                     target_time=result.target.time if result.target else None,
-                    status=result.status, error_ms=result.error_ms, mistakes=self.session.mistakes)
+                    status=result.status, error_ms=result.error_ms, mistakes=self.session.mistakes,
+                    mistake_beats=sorted(self.session.mistake_beats))
         self._report_outcome()
 
     def reload(self):
@@ -359,7 +360,7 @@ class RhythmApp:
         for index, state in self.session.states.items():
             if index not in self._logged_states:
                 self.record("target", target_index=index, status=state,
-                            target_time=self.chart.targets[index].time)
+                            target_time=self.session.score_chart.targets[index].time)
                 self._logged_states.add(index)
         for index, state in self.session.preparation_states.items():
             if index not in self._logged_preparation_states:
@@ -375,7 +376,8 @@ class RhythmApp:
                          f"命中 {self.session.hits} · 漏拍 {self.session.misses} · 错误 {self.session.mistakes}；拍手重来",
                          RED if self.session.failed else GREEN)
             self.record("round_end", outcome=outcome, hits=self.session.hits, misses=self.session.misses,
-                        mistakes=self.session.mistakes, failure_time=self.session.failure_time,
+                        mistakes=self.session.mistakes, mistake_beats=sorted(self.session.mistake_beats),
+                        accuracy=self.session.accuracy, failure_time=self.session.failure_time,
                         failure_reason=self.session.failure_reason, round_end_time=self.session.round_end_time)
 
     def update(self):
