@@ -46,7 +46,7 @@ class RhythmWindow(arcade.Window):
             super().__init__(
                 controller.config.width,
                 controller.config.height,
-                "主音归来 · 节奏练习",
+                "节奏练习",
                 resizable=True,
                 visible=visible,
                 update_rate=1 / 120,
@@ -176,8 +176,7 @@ class RhythmWindow(arcade.Window):
         reading = app.engine.reading()
         position = reading.position if reading.generation == app.expected_generation else 0.0
         bar = app.chart.bar_at(position)
-        self._text("title", "主音归来 · 节奏 demo", 64, 25, 24)
-        self._text("track", cfg.music_path.name, 64, 64, 15, MUTED, max_width=850)
+        self._text("track", cfg.music_path.name, 64, 41, 16, MUTED, max_width=850)
         self._text("bpm", f"{cfg.bpm:g} BPM", 1096, 41, 16, MUTED, anchor_x="right")
         self._card(self._settings_button)
         self._text("settings-entry", "设置", 1162, 39, 17)

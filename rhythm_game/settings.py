@@ -432,7 +432,7 @@ class SettingsPage:
         w = self.window
         self._buttons.clear()
         self._field_rects.clear()
-        w._text("settings-title", "Demo 设置", 48, 26, 26)
+        w._text("settings-title", "设置", 48, 26, 26)
         self._button("return", "取消并返回", (1072, 24, 160, 42), w.close_settings, enabled=not self.calibrating)
         for index, (tab, title) in enumerate((("music", "音乐与节奏"), ("game", "游戏规则"), ("calibration", "校准"), ("audio", "声音与输入"))):
             self._button(("tab", tab), title, (48 + index * 180, 88, 164, 42),
