@@ -2,7 +2,7 @@
 
 当前实现拍掌／节奏游戏的第 1 阶段软件链路：播放音乐、键盘模拟拍掌、即时拍手音效、校准后的最近目标判定，以及五线谱与下落短线。画面使用 **Arcade**，音乐和音效共用独立的 **sounddevice／PortAudio** 输出流。
 
-当前不接手套。TouchDesigner 同屏、正式美术与演出联调留在后续阶段；音高检测暂不优先。
+Arduino Nano 手套已开始真实串口验证，115200 baud 接触／离开信号可接收，串口监测工具提供可调的 30 毫秒稳定去抖；目前游戏仍使用键盘输入。监测方式、已观察问题与延迟测量边界见[手套串口验证](docs/glove-serial-validation.md)。TouchDesigner 同屏、正式美术与演出联调留在后续阶段；音高检测暂不优先。
 
 ## 运行
 
@@ -92,6 +92,7 @@ python beatgame.py --demo-seconds 10 --screenshot tmp/phase1-ui.png
 - [规则与画面要求](docs/rhythm-game-rules.md)
 - [分阶段开发计划](docs/rhythm-development-plan.md)
 - [第 1 阶段软件验证](docs/phase1-validation.md)
+- [Arduino 手套串口验证与监测工具](docs/glove-serial-validation.md)
 - `experiments/interval_judge.py` 保留早期命令行判定实验。
 
 代码、配置、开发文档和 UI 历史参考图纳入仓库。音乐、日志、临时截图、IDE 配置、本机协作约定及早期选型调查保留在本地。
