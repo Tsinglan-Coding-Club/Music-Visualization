@@ -19,6 +19,22 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.bpm, 90)
         self.assertEqual(cfg.beat_start_seconds, 4)
         self.assertEqual(cfg.beat_offset_ms, 0)
+        self.assertFalse(cfg.glove_enabled)
+
+    def test_glove_config_survives_settings_save(self):
+        original = CONFIG_TEXT + '\n[glove]\nenabled = true\nport = "COM7"\n'
+        path = write_config(self.root, original)
+        text, config = prepare_config_update(path, {"beat_offset_ms": 30}, original)
+        self.assertTrue(config.glove_enabled)
+        self.assertEqual(config.glove_port, "COM7")
+        self.assertEqual(config.glove_baudrate, 115200)
+        self.assertEqual(config.glove_debounce_ms, 30)
+        self.assertIn('port = "COM7"', text)
+
+    def test_glove_rejects_invalid_boolean_and_timing(self):
+        for field in ('enabled = "true"', 'debounce_ms = nan', 'debounce_ms = -1', 'baudrate = 115200.5'):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                load_config(write_config(self.root, CONFIG_TEXT + '\n[glove]\n' + field + '\n'))
 
     def test_global_and_input_offsets_are_independent(self):
         text = CONFIG_TEXT.replace("beat_offset_ms = 0.0", "beat_offset_ms = -50.0")

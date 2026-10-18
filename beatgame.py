@@ -33,7 +33,7 @@ def main():
             print(f"速度：四分音符 = {config.bpm:g}；首拍：{chart.start:.3f}s；目标数：{len(chart.targets)}")
             print("配置与音乐检查通过；尚未打开音频设备。")
             return 0
-        app = RhythmApp(args.config)
+        app = RhythmApp(args.config, enable_glove=args.demo_seconds is None)
         try:
             from rhythm_game.window import RhythmWindow
             window = RhythmWindow(app)

@@ -14,7 +14,7 @@ from serial.tools import list_ports
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-from rhythm_game.glove import ContactDebouncer
+from rhythm_game.glove import ContactDebouncer, parse_line
 
 SERIAL_ERRORS = (serial.SerialException, OSError)
 if os.name == "posix":
@@ -66,16 +66,6 @@ def timing_report(rows):
         previous_device = device
     finish()
     return segments
-
-
-def parse_line(line):
-    if line == "READY":
-        return {"type": "ready"}
-    parts = line.split(",")
-    if (len(parts) == 2 and parts[0] in ("0", "1") and len(parts[1]) <= 10 and parts[1].isascii()
-            and parts[1].isdigit() and 0 <= int(parts[1]) <= 0xFFFFFFFF):
-        return {"type": "contact" if parts[0] == "1" else "release", "device_ms": int(parts[1])}
-    return {"type": "invalid"}
 
 
 def monitor(port, baudrate, seconds, debounce_ms=30.0):

@@ -29,6 +29,10 @@ class Config:
     width: int
     height: int
     lookahead_seconds: float
+    glove_enabled: bool = False
+    glove_port: str = ""
+    glove_baudrate: int = 115200
+    glove_debounce_ms: float = 30.0
 
 
 def load_config(path: str | Path) -> Config:
@@ -45,6 +49,7 @@ def parse_config_text(text: str, source: str | Path) -> Config:
         "judgment": {"window_ms", "input_offset_ms"},
         "audio": {"device", "blocksize", "clap_path", "clap_volume"},
         "display": {"width", "height", "lookahead_seconds"},
+        "glove": {"enabled", "port", "baudrate", "debounce_ms"},
     }
     for section, values in data.items():
         if section not in allowed or not isinstance(values, dict):
@@ -53,8 +58,12 @@ def parse_config_text(text: str, source: str | Path) -> Config:
         if unknown:
             raise ValueError(f"{section} 中有未知配置：{', '.join(sorted(unknown))}")
     for section in allowed:
-        if section not in data:
+        if section not in data and section != "glove":
             raise ValueError(f"配置缺少 [{section}]")
+    data["glove"] = {"enabled": False, "port": "", "baudrate": 115200, "debounce_ms": 30.0,
+                     **data.get("glove", {})}
+    if not isinstance(data["glove"]["enabled"], bool):
+        raise ValueError("glove.enabled 必须是布尔值")
 
     def value(section, key):
         try:
@@ -115,6 +124,9 @@ def parse_config_text(text: str, source: str | Path) -> Config:
         number("display", "width", 1000, 3840, integer=True),
         number("display", "height", 700, 2160, integer=True),
         number("display", "lookahead_seconds", 0.5, 10),
+        data["glove"]["enabled"], text("glove", "port").strip(),
+        number("glove", "baudrate", 1, 3000000, integer=True),
+        number("glove", "debounce_ms", 0, 1000),
     )
 
 

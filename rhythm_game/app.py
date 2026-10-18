@@ -8,6 +8,8 @@ from time import perf_counter
 from .audio import AudioEngine
 from .configuration import load_config, prepare_config_update, save_config_text
 from .core import RhythmChart, RhythmSession
+from .glove_input import GloveInput
+from .input_bridge import InputBridge, JudgmentInput
 
 
 BG = (12, 16, 25)
@@ -26,7 +28,7 @@ def make_chart(config, duration):
 
 
 class RhythmApp:
-    def __init__(self, config_path, log_dir=None):
+    def __init__(self, config_path, log_dir=None, enable_glove=True):
         self.config_path = Path(config_path)
         self.config = load_config(self.config_path)
         self.engine = AudioEngine(self.config)
@@ -43,6 +45,13 @@ class RhythmApp:
         self.auto_input = False
         self._auto_target_cursor = 0
         self._round_reported = False
+        self.inputs = InputBridge()
+        self.glove = None
+        self._input_mode = "game"
+        self._closed = False
+        self._glove_allowed = enable_glove
+        self._reported_input_drops = 0
+        self._pending_inputs = []
         log_dir = Path(log_dir) if log_dir else self.config.source.parent / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         self.log_path = log_dir / f"session-{datetime.now():%Y%m%d-%H%M%S-%f}.jsonl"
@@ -58,7 +67,83 @@ class RhythmApp:
                     beat_offset_ms=self.config.beat_offset_ms,
                     input_offset_ms=self.config.input_offset_ms, window_ms=self.config.window_ms,
                     sample_rate=self.engine.sample_rate, blocksize=self.config.blocksize,
-                    output_latency_ms=self.engine.latency_ms, software_input=True)
+                    output_latency_ms=self.engine.latency_ms,
+                    input_sources=["keyboard", "glove"] if self.config.glove_enabled and enable_glove else ["keyboard"])
+        self._configure_glove()
+
+    def _configure_glove(self):
+        fields = ("glove_enabled", "glove_port", "glove_baudrate", "glove_debounce_ms")
+        if (self.glove is not None and self._glove_allowed
+                and all(getattr(self.glove.config, key) == getattr(self.config, key) for key in fields)):
+            return
+        self.inputs.invalidate_source()
+        if self.glove is not None:
+            self.glove.close()
+            self.glove = None
+        if self.config.glove_enabled and self._glove_allowed and not self._closed:
+            receive, record = self.inputs.source_callbacks()
+            self.glove = GloveInput(self.config, receive, record)
+            self.glove.start()
+
+    @property
+    def input_settle_seconds(self):
+        return (self.config.glove_debounce_ms / 1000 + .050
+                if self.config.glove_enabled and self._glove_allowed and not self.auto_input else 0)
+
+    def _activate_inputs(self):
+        if self.auto_input:
+            self._invalidate_inputs()
+            return
+        grace = self.config.window_ms / 1000 + max(self.config.input_offset_ms, 0) / 1000
+        self.inputs.activate(self.engine, self.expected_generation, self._input_mode, grace,
+                             max(.001, self.input_settle_seconds))
+
+    def _invalidate_inputs(self):
+        self.inputs.deactivate()
+        self._pending_inputs.clear()
+
+    def queue_calibration_input(self, host_time, music_time, source):
+        if not self.input_settle_seconds:
+            return False
+        self._pending_inputs.append(JudgmentInput(host_time, music_time, source, "calibration"))
+        return True
+
+    def _flush_inputs(self, through):
+        ready = sorted((item for item in self._pending_inputs if item.music_time <= through + 1e-9),
+                       key=lambda item: (item.music_time, item.host_time))
+        self._pending_inputs = [item for item in self._pending_inputs if item.music_time > through + 1e-9]
+        calibration = []
+        for item in ready:
+            if item.mode == "calibration":
+                calibration.append(item)
+            else:
+                self._judge_clap(item.host_time, item.music_time, item.source)
+        return calibration
+
+    def reconnect_glove(self):
+        if self.glove is not None:
+            self.glove.reconnect()
+
+    def poll_glove_inputs(self):
+        if self.inputs.dropped > self._reported_input_drops:
+            self.record("glove_queue_overflow", dropped=self.inputs.dropped - self._reported_input_drops)
+            self._reported_input_drops = self.inputs.dropped
+        for event, fields in self.inputs.drain():
+            if event != "transition":
+                self.record(event, **fields)
+                continue
+            current = fields.accepted and self.inputs.is_current(fields)
+            self.record("glove_transition", contacting=fields.contacting, host_time=fields.host_time,
+                        confirmed_time=fields.confirmed_time, device_ms=fields.device_ms,
+                        music_time=fields.music_time, accepted=current,
+                        reason=fields.reason if not fields.accepted or current else "old_playback",
+                        input_mode=fields.mode)
+            if not current:
+                continue
+            if fields.mode == "calibration":
+                self._pending_inputs.append(JudgmentInput(fields.host_time, fields.music_time, "glove", "calibration"))
+            else:
+                self.clap(fields.host_time, fields.music_time, play_sound=False, source="glove")
 
     def record(self, event, **fields):
         self.log.write(json.dumps({"event": event, "generation": self.expected_generation,
@@ -68,7 +153,9 @@ class RhythmApp:
         self.feedback = (title, subtitle, color)
         self.feedback_time = perf_counter()
 
-    def start(self):
+    def start(self, input_mode="game"):
+        self._invalidate_inputs()
+        self._input_mode = input_mode
         self.expected_generation = self.engine.play(0)
         self.desired_playing = True
         self.paused = False
@@ -77,26 +164,33 @@ class RhythmApp:
         self._auto_target_cursor = 0
         self.session.reset()
         self._round_reported = False
+        self._activate_inputs()
         self.message("等待启动拍手", "任意小节第一拍按空格，预备后打一小节", PURPLE)
-        self.record("start", entry_time=None)
+        self.record("start", entry_time=None, input_mode=input_mode)
 
     def reset_round(self):
+        self._invalidate_inputs()
         self.session.reset()
         self._logged_states.clear()
         self._round_reported = False
+        if self.desired_playing:
+            self._activate_inputs()
         self.message("等待启动拍手", "任意小节第一拍按空格，预备后打一小节", PURPLE)
         self.record("reset_round")
 
     def toggle_pause(self):
         if self.paused:
+            self._invalidate_inputs()
             self.engine.resume()
             self.paused = False
             self.desired_playing = True
+            self._activate_inputs()
             self.message("继续练习", "目标仍跟随原音乐位置", GREEN)
             self.record("resume")
         elif self.desired_playing:
             if self.engine.reading().position >= self.engine.duration:
                 return
+            self._invalidate_inputs()
             self.engine.pause()
             self.paused = True
             self.desired_playing = False
@@ -104,6 +198,7 @@ class RhythmApp:
             self.record("pause")
 
     def stop(self):
+        self._invalidate_inputs()
         self.expected_generation = self.engine.stop()
         self.desired_playing = False
         self.paused = False
@@ -114,7 +209,7 @@ class RhythmApp:
         self.message("已停止", "按 Enter 重新播放")
         self.record("stop")
 
-    def clap(self, host_time=None, music_time=None):
+    def clap(self, host_time=None, music_time=None, play_sound=True, source="keyboard"):
         host_time = perf_counter() if host_time is None else host_time
         reading = self.engine.reading(host_time)
         grace = self.config.window_ms / 1000 + max(self.config.input_offset_ms, 0) / 1000
@@ -122,16 +217,27 @@ class RhythmApp:
         if not self.desired_playing or not (reading.playing or in_tail) or reading.generation != self.expected_generation:
             self.message("当前未播放", "按 Enter 开始，或按 P 继续")
             return
-        self.engine.trigger_clap()
+        if play_sound:
+            self.engine.trigger_clap()
         # 正常输入在键盘事件分发时计时。自动验证可传入已知音乐位置。
         position = reading.position + reading.tail_seconds if music_time is None else music_time
-        position = max(position, self.last_judge_time)
+        if self.input_settle_seconds:
+            self._pending_inputs.append(JudgmentInput(host_time, position, source, "game"))
+            return
+        self._judge_clap(host_time, position, source)
+
+    def _judge_clap(self, host_time, position, source):
+        if position + 1e-9 < self.last_judge_time:
+            self.record("input_discarded", source=source, host_time=host_time,
+                        music_time=position, reason="out_of_order")
+            return
+        position = max(position, self.last_judge_time)  # 只吸收浮点舍入量；真正乱序在上方拒绝。
         self.last_judge_time = position
         self._advance_session(position)
         if self.session.entry_time is None or self.session.finished:
             if not self.session.try_start(position):
                 self.message("等待小节第一拍", "拍手声已触发；第一拍拍手才出现本小节短线", PURPLE)
-                self.record("clap", host_time=host_time, music_time=position,
+                self.record("clap", source=source, host_time=host_time, music_time=position,
                             corrected_time=position - self.config.input_offset_ms / 1000,
                             target_index=None, target_time=None, status="waiting", error_ms=None)
                 return
@@ -143,7 +249,7 @@ class RhythmApp:
             if self.config.lead_in_bars:
                 self.message("预备一小节" if self.config.lead_in_bars == 1 else "预备中",
                              f"{self.session.entry_time:.3f} 秒正式开始；这次拍手不计分", PURPLE)
-                self.record("clap", host_time=host_time, music_time=position,
+                self.record("clap", source=source, host_time=host_time, music_time=position,
                             corrected_time=position - self.config.input_offset_ms / 1000,
                             target_index=None, target_time=None, status="preparing", error_ms=None)
                 return
@@ -153,7 +259,7 @@ class RhythmApp:
         color = GREEN if result.status == "hit" else PURPLE if result.status == "waiting" else RED
         detail = f"{result.error_ms:+.1f} ms" if result.error_ms is not None else "拍掌声已触发；尚未进入判定窗口"
         self.message(labels[result.status], detail, color)
-        self.record("clap", host_time=host_time, music_time=position,
+        self.record("clap", source=source, host_time=host_time, music_time=position,
                     corrected_time=position - self.config.input_offset_ms / 1000,
                     target_index=result.target.index if result.target else None,
                     target_time=result.target.time if result.target else None,
@@ -207,6 +313,7 @@ class RhythmApp:
         self.session = RhythmSession(chart, config.window_ms, config.input_offset_ms,
                                      lead_in_bars=config.lead_in_bars)
         self.expected_generation = replacement.generation
+        self._configure_glove()
         self.message("设置已保存" if text is not None else "配置已加载", f"首拍 {chart.start:.3f} 秒；按 Enter 重播", GREEN)
         self.record("reload", bpm=config.bpm, beat_start=chart.start,
                     beat_offset_ms=config.beat_offset_ms, input_offset_ms=config.input_offset_ms,
@@ -228,20 +335,28 @@ class RhythmApp:
                         round_end_time=self.session.round_end_time)
 
     def update(self):
+        # 先固定结算水位，再排空输入；随后到达且仍在接收预算内的事件
+        # 不会落在该水位之前，避免刚确认的拍掌被提前记漏。
         reading = self.engine.reading()
+        self.poll_glove_inputs()
+        calibration = []
         if reading.generation == self.expected_generation:
             # 音乐播完后，按实际主机时钟等待最后目标的窗口与输入补偿余量。
             end_time = reading.position + reading.tail_seconds
+            calibration = self._flush_inputs(end_time - self.input_settle_seconds)
             if end_time >= self.engine.duration:
                 grace = self.config.window_ms / 1000 + max(self.config.input_offset_ms, 0) / 1000
-                if self.desired_playing and reading.tail_seconds > grace:
+                if self.desired_playing and reading.tail_seconds > grace + self.input_settle_seconds:
+                    self._invalidate_inputs()
                     self.message("播放结束", "按 Backspace 重来；本轮结果已保存", GREEN)
                     self.desired_playing = False
                     self.record("ended", music_time=reading.position)
-            self._advance_session(end_time)
+            self._advance_session(end_time - self.input_settle_seconds)
         if self.engine.stream is not None and not self.engine.stream.active:
+            self._invalidate_inputs()
             self.desired_playing = False
             self.message("音频输出已中断", "检查输出设备后按 F5 重新连接", RED)
+        return calibration
 
     def inject_due_targets(self):
         """自动验证使用预先已知的输入时间戳，不模拟人的按键延迟。"""
@@ -266,6 +381,15 @@ class RhythmApp:
                 self.clap(music_time=target.time + self.config.input_offset_ms / 1000)
 
     def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._invalidate_inputs()
+        self.inputs.invalidate_source()
+        if self.glove is not None:
+            self.glove.close()
+        if not self.log.closed:
+            self.poll_glove_inputs()
         self.engine.close()
         if not self.log.closed:
             self.log.close()

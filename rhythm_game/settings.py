@@ -91,20 +91,24 @@ class SettingsPage:
         self.calibrator = calibrator
         self.focus = None
         self.calibrating = True
-        self.app.start()
+        self.app.start(input_mode="calibration")
         self.app.record("calibration_start", bpm=self.app.config.bpm,
                         beat_offset_ms=offset, input_offset_ms=compensation)
         self._message("")
 
-    def tap(self, host_time):
+    def tap(self, host_time, music_time=None, play_sound=True, source="keyboard", settled=False):
         if not self.calibrating:
             return
         reading = self.app.engine.reading(host_time)
         if reading.generation != self.app.expected_generation or not reading.playing:
             return
-        self.app.engine.trigger_clap()
-        accepted = self.calibrator.add(reading.position)
-        self.app.record("calibration_tap", host_time=host_time, music_time=reading.position,
+        if play_sound:
+            self.app.engine.trigger_clap()
+        position = reading.position if music_time is None else music_time
+        if not settled and self.app.queue_calibration_input(host_time, position, source):
+            return
+        accepted = self.calibrator.add(position)
+        self.app.record("calibration_tap", source=source, host_time=host_time, music_time=position,
                         accepted=accepted)
         estimate = self.calibrator.estimate()
         self._message("")
@@ -235,14 +239,24 @@ class SettingsPage:
         except ValueError:
             preview = "首拍 —"
         w._text("settings-first-preview", preview, 64, 668, 16, GREEN)
+        glove = self.app.glove
+        if glove is not None:
+            statuses = {"ready": "手套已就绪", "connecting": "手套连接中", "waiting_release": "请松开手套",
+                        "disconnected": "手套未连接", "error": "手套连接失败", "delayed": "手套信号延迟"}
+            w._text("settings-glove", statuses.get(glove.status, "手套未连接"), 64, 634, 14,
+                    GREEN if glove.status == "ready" else MUTED)
+            self._button("glove-reconnect", "重连", (474, 628, 86, 34), self.app.reconnect_glove)
         if self.focus is not None:
             hint = FIELDS[self.focus][2]
             if hint:
                 w._text("settings-field-help", hint, 64, 704, 13, MUTED)
+        elif glove is not None and glove.status in ("disconnected", "error", "delayed"):
+            w._text("settings-glove-help", "重新插拔 USB 或点击重连", 64, 704, 13, MUTED)
 
         w._card((624, 116, 616, 614))
         w._text("calibration-title", "首拍校准", 648, 137, 24)
-        w._text("calibration-instruction", "听音乐，每拍按一次空格（至少 8 拍）", 648, 184, 16, MUTED)
+        instruction = "听音乐，每拍拍手一次（空格备用，至少 8 拍）" if glove is not None else "听音乐，每拍按一次空格（至少 8 拍）"
+        w._text("calibration-instruction", instruction, 648, 184, 16, MUTED)
         self._button("start", "重新校准" if self.calibrator else "开始校准",
                      (648, 232, 168, 43), self.start_calibration, primary=True)
         self._button("finish", "完成", (832, 232, 104, 43), self.finish_calibration, enabled=self.calibrating)

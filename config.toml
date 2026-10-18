@@ -27,3 +27,9 @@ clap_volume = 0.45
 width = 1280
 height = 800
 lookahead_seconds = 3.0
+
+[glove]
+enabled = true
+port = ""                         # 留空自动选择唯一 USB 串口；多个设备时填写具体端口
+baudrate = 115200
+debounce_ms = 30.0                 # 接触和松开均稳定此时长后才确认

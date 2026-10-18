@@ -4,6 +4,16 @@ from dataclasses import dataclass
 import math
 
 
+def parse_line(line):
+    if line == "READY":
+        return {"type": "ready"}
+    parts = line.split(",")
+    if (len(parts) == 2 and parts[0] in ("0", "1") and len(parts[1]) <= 10
+            and parts[1].isascii() and parts[1].isdigit() and int(parts[1]) <= 0xFFFFFFFF):
+        return {"type": "contact" if parts[0] == "1" else "release", "device_ms": int(parts[1])}
+    return {"type": "invalid"}
+
+
 @dataclass(frozen=True)
 class ContactTransition:
     contacting: bool

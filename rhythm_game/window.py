@@ -276,7 +276,8 @@ class RhythmWindow(arcade.Window):
             self._card(rect, GREEN if primary else (35, 44, 62), 9)
             self._text(("button", index), label, rect[0] + 42, rect[1] + 12, 18, BG if primary else TEXT)
         if app.desired_playing:
-            self._text("clap-key", "空格 · 拍手", 1216, 751, 16, MUTED, anchor_x="right")
+            hint = "空格备用" if app.glove is not None else "空格 · 拍手"
+            self._text("clap-key", hint, 1216, 751, 16, MUTED, anchor_x="right")
 
     def _game_buttons(self):
         app = self.controller
@@ -360,8 +361,11 @@ class RhythmWindow(arcade.Window):
         app = self.controller
         if self._settings is None and app.auto_input and app.desired_playing:
             app.inject_due_targets()
-        app.update()
+        calibration_inputs = app.update()
         if self._settings is not None:
+            for event in calibration_inputs:
+                self._settings.tap(event.host_time, event.music_time, play_sound=False,
+                                   source=event.source, settled=True)
             self._settings.update()
         now = perf_counter()
         if now >= self._next_flush:
