@@ -1,4 +1,4 @@
-"""固定速度的跟拍相位估计；不把主观跟拍当成硬件延迟测量。"""
+"""跟拍相位与独立速度估计；不把主观跟拍当成硬件延迟测量。"""
 
 from dataclasses import dataclass
 import math
@@ -17,6 +17,90 @@ class CalibrationEstimate:
     message: str
     average_bpm: float | None = None
     tempo_intervals: int = 0
+
+
+@dataclass(frozen=True)
+class TempoEstimate:
+    count: int
+    used: int
+    rejected: int
+    ready: bool
+    message: str
+    average_bpm: float | None = None
+    tempo_intervals: int = 0
+    spread_ms: float = 0
+
+
+class TempoCalibrator:
+    """用连续四分音符拍掌的间隔估计速度，不读取设定 BPM 或首拍。
+
+    少量漏拍／多拍造成的间隔可作为离群值排除，但不按倍数补齐或吸附。
+    持续隔拍或每拍两次与真正的慢／快速度无法仅凭输入区分，需试听确认。
+    ``used`` 是有效间隔数加一，表示等价的连续有效拍数，并非拍点归属。
+    """
+
+    minimum_samples = 8
+    maximum_samples = 64
+    minimum_interval = 60 / 600
+    maximum_interval = 60 / 1
+
+    def __init__(self):
+        self.samples = []
+        self.rejected = 0
+
+    def add(self, music_time):
+        if isinstance(music_time, bool) or not isinstance(music_time, (int, float)) or not math.isfinite(music_time):
+            raise ValueError("拍掌时间必须是有限数字")
+        # 只排除超过配置速度范围的极快重复；不依赖当前设置或音乐起点。
+        interval = music_time - self.samples[-1] if self.samples else None
+        if (music_time < 0 or interval is not None
+                and interval < self.minimum_interval
+                and not math.isclose(interval, self.minimum_interval, rel_tol=1e-9, abs_tol=1e-12)):
+            self.rejected += 1
+            return False
+        self.samples.append(music_time)
+        if len(self.samples) > self.maximum_samples:
+            self.samples.pop(0)
+        return True
+
+    def estimate(self):
+        count = len(self.samples)
+        if count < 2:
+            return TempoEstimate(count, count, self.rejected, False,
+                                 "请听音乐，每个四分音符拍掌一次，至少采集 8 拍")
+        intervals = [end - start for start, end in zip(self.samples, self.samples[1:])]
+        valid = [value for value in intervals
+                 if (value >= self.minimum_interval
+                     or math.isclose(value, self.minimum_interval, rel_tol=1e-9))
+                 and (value <= self.maximum_interval
+                      or math.isclose(value, self.maximum_interval, rel_tol=1e-9))]
+        if not valid:
+            return TempoEstimate(count, 0, self.rejected + len(intervals), False,
+                                 "拍掌间隔超出 1–600 BPM 范围，请重新采样")
+        center = median(valid)
+        mad = median(abs(value - center) for value in valid)
+        cutoff = max(center * 0.04, min(center * 0.20, 3 * 1.4826 * mad))
+        inliers = [value for value in valid if abs(value - center) <= cutoff]
+        if not inliers:
+            return TempoEstimate(count, 0, self.rejected + len(intervals), False,
+                                 "跟拍速度不够稳定，请继续采样或重新校准",
+                                 60 / center, 0, mad * 1000)
+        center = median(inliers)
+        errors = sorted(abs(value - center) for value in inliers)
+        spread = errors[max(0, math.ceil(len(errors) * 0.90) - 1)]
+        used = len(inliers) + 1
+        # 至少八拍、四分之三间隔一致；同时限制相对误差与绝对抖动。
+        ready = (used >= self.minimum_samples and len(inliers) >= len(intervals) * 0.75
+                 and spread <= min(0.060, center * 0.06))
+        if used < self.minimum_samples:
+            message = f"还需稳定拍掌：有效 {used} / {self.minimum_samples}"
+        elif not ready:
+            message = "跟拍速度不够稳定，请继续采样或重新校准"
+        else:
+            message = "请试听确认四分音符速度；持续漏拍或多拍可能导致半速或倍速"
+        bpm = max(1.0, min(600.0, 60 / center))
+        return TempoEstimate(count, used, self.rejected + len(intervals) - len(inliers),
+                             ready, message, bpm, len(inliers), spread * 1000)
 
 
 class BeatCalibrator:

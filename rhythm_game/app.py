@@ -1,5 +1,6 @@
 """软件练习控制器；音频与判定不依赖画面引擎。"""
 
+from dataclasses import replace
 from datetime import datetime
 import json
 from pathlib import Path
@@ -12,14 +13,14 @@ from .glove_input import GloveInput
 from .input_bridge import InputBridge, JudgmentInput
 
 
-BG = (12, 16, 25)
-PANEL = (21, 27, 40)
-LINE = (42, 51, 70)
-TEXT = (237, 241, 250)
-MUTED = (143, 157, 183)
-GREEN = (114, 235, 187)
-PURPLE = (176, 158, 255)
-RED = (255, 135, 148)
+BG = (255, 255, 255)
+PANEL = (247, 247, 247)
+LINE = (210, 210, 210)
+TEXT = (35, 35, 35)
+MUTED = (105, 105, 105)
+GREEN = (35, 110, 65)
+PURPLE = (55, 85, 150)
+RED = (180, 45, 45)
 
 
 def make_chart(config, duration):
@@ -119,6 +120,11 @@ class RhythmApp:
             else:
                 self._judge_clap(item.host_time, item.music_time, item.source)
         return calibration
+
+    def take_calibration_inputs(self):
+        """手动完成时取出已确认输入，避免停止播放清空尚未结算的最后几拍。"""
+        self.poll_glove_inputs()
+        return self._flush_inputs(float("inf"))
 
     def reconnect_glove(self):
         if self.glove is not None:
@@ -273,6 +279,19 @@ class RhythmApp:
             return False
         return self._activate_config(config)
 
+    def preview_settings(self, updates, expected_text, tempo_only=False):
+        """用草稿曲目与参数试听／校准；不写配置，离开页面时恢复。"""
+        try:
+            _, config = prepare_config_update(self.config_path, updates, expected_text)
+            if tempo_only:
+                # 速度采样不依赖首拍；短曲目的未知起点不能阻止独立速度校准。
+                # 此临时起点只供无计分的试听使用，不修改页面草稿或磁盘配置。
+                config = replace(config, beat_start_seconds=0, beat_offset_ms=0)
+        except Exception as exc:
+            self.message("设置未应用", str(exc), RED)
+            return False
+        return self._activate_config(config)
+
     def apply_settings(self, updates, expected_text):
         try:
             text, config = prepare_config_update(self.config_path, updates, expected_text)
@@ -315,7 +334,8 @@ class RhythmApp:
         self.expected_generation = replacement.generation
         self._configure_glove()
         self.message("设置已保存" if text is not None else "配置已加载", f"首拍 {chart.start:.3f} 秒；按 Enter 重播", GREEN)
-        self.record("reload", bpm=config.bpm, beat_start=chart.start,
+        self.record("reload", music_path=str(config.music_path), bpm=config.bpm,
+                    beats_per_bar=config.beats_per_bar, note_values=config.note_values, beat_start=chart.start,
                     beat_offset_ms=config.beat_offset_ms, input_offset_ms=config.input_offset_ms,
                     window_ms=config.window_ms, blocksize=config.blocksize)
         return True

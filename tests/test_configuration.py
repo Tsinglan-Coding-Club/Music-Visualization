@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -86,6 +87,96 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(load_config(path).beat_offset_ms, 75)
         self.assertEqual(load_config(path).music_volume, 0.25)
         self.assertFalse(list(self.root.glob(".*.tmp")))
+
+    def test_rhythm_fields_validate_as_one_update(self):
+        path = write_config(self.root)
+        updates = {"bpm": 120, "beat_start_seconds": 1.25, "beats_per_bar": 3,
+                   "note_values": (4, 8, 8, 4), "lead_in_bars": 1}
+        text, config = prepare_config_update(path, updates, CONFIG_TEXT)
+        self.assertEqual(config.bpm, 120)
+        self.assertEqual(config.beat_start_seconds, 1.25)
+        self.assertEqual(config.beats_per_bar, 3)
+        self.assertEqual(config.note_values, (4, 8, 8, 4))
+        self.assertEqual(config.lead_in_bars, 1)
+        self.assertEqual(config.blocksize, 128)
+        self.assertEqual(path.read_text(), CONFIG_TEXT)
+        save_config_text(path, text, CONFIG_TEXT)
+        self.assertEqual(load_config(path), config)
+
+    def test_coupled_rhythm_checks_remain_enabled(self):
+        path = write_config(self.root)
+        for updates in ({"beats_per_bar": 3}, {"note_values": [4]},
+                        {"bpm": 600}, {"note_values": [64] * 64},
+                        {"beat_start_seconds": 0, "beat_offset_ms": -1}):
+            with self.subTest(updates=updates), self.assertRaises(ValueError):
+                prepare_config_update(path, updates, CONFIG_TEXT)
+        _, config = prepare_config_update(
+            path, {"bpm": 600, "note_values": [4] * 4, "window_ms": 40}, CONFIG_TEXT)
+        self.assertEqual(config.bpm, 600)
+        self.assertEqual(config.window_ms, 40)
+
+    def test_editable_field_types_are_checked(self):
+        path = write_config(self.root)
+        invalid = [
+            {"bpm": True}, {"bpm": float("nan")}, {"bpm": float("inf")},
+            {"bpm": "120"}, {"beat_start_seconds": -1}, {"beat_start_seconds": False},
+            {"beats_per_bar": 3.5}, {"beats_per_bar": True}, {"beats_per_bar": 0},
+            {"lead_in_bars": 0.5}, {"lead_in_bars": 2}, {"lead_in_bars": False},
+            {"note_values": []}, {"note_values": "4 4 4 4"},
+            {"note_values": [True, 4, 4, 4]}, {"note_values": [4.0] * 4},
+            {"note_values": [3] * 3}, {"music_path": 3}, {"music_path": "  "},
+            {"music_path": "missing.wav"},
+        ]
+        for updates in invalid:
+            with self.subTest(updates=updates), self.assertRaises(ValueError):
+                prepare_config_update(path, updates, CONFIG_TEXT)
+            self.assertEqual(path.read_text(), CONFIG_TEXT)
+
+    def test_music_path_roundtrip_preserves_unicode_quotes_hash_and_backslash(self):
+        old_music = self.root / r'旧 # \"曲.wav'
+        old_music.write_bytes(b"test")
+        original = CONFIG_TEXT.replace('path = "music.wav"',
+                                       "path = " + json.dumps(str(old_music.name), ensure_ascii=False)
+                                       + "   # 保留曲目说明")
+        path = write_config(self.root, original)
+        folder = self.root / "music"
+        folder.mkdir()
+        music = folder / r'新 # \"曲.wav'
+        music.write_bytes(b"test")
+        text, config = prepare_config_update(path, {"music_path": music}, original)
+        self.assertIn("   # 保留曲目说明", text)
+        self.assertIn('path = ' + json.dumps(str(music.relative_to(self.root)), ensure_ascii=False), text)
+        self.assertEqual(config.music_path, music.resolve())
+        save_config_text(path, text, original)
+        self.assertEqual(load_config(path).music_path, music.resolve())
+
+    def test_music_relative_draft_and_external_paths(self):
+        folder = self.root / "music"
+        folder.mkdir()
+        music = folder / "另一首.mp3"
+        music.write_bytes(b"test")
+        path = write_config(self.root)
+        text, config = prepare_config_update(path, {"music_path": "music/../music/另一首.mp3"}, CONFIG_TEXT)
+        self.assertIn('path = "music/另一首.mp3"', text)
+        self.assertEqual(config.music_path, music.resolve())
+        with tempfile.TemporaryDirectory() as outside:
+            external = Path(outside) / '外部 # "音乐.wav'
+            external.write_bytes(b"test")
+            text, config = prepare_config_update(path, {"music_path": str(external)}, CONFIG_TEXT)
+            self.assertIn("path = " + json.dumps(str(external.resolve()), ensure_ascii=False), text)
+            self.assertEqual(config.music_path, external.resolve())
+
+    def test_multiline_note_template_keeps_comments_and_unrelated_settings(self):
+        original = CONFIG_TEXT.replace("note_values = [4, 8, 8, 4, 4]", """note_values = [
+    4, # 第一拍
+    8, 8, 4, 4,
+]  # 小节结束""")
+        path = write_config(self.root, original)
+        text, config = prepare_config_update(path, {"note_values": [2, 2]}, original)
+        self.assertIn("# 第一拍", text)
+        self.assertIn("note_values = [2, 2]  # 小节结束", text)
+        self.assertIn('device = ""', text)
+        self.assertEqual(config.note_values, (2, 2))
 
     def test_invalid_or_external_updates_preserve_file(self):
         path = write_config(self.root)

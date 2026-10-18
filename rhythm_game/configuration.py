@@ -1,6 +1,7 @@
 """独立 TOML 配置；所有素材路径相对于配置文件。"""
 
 from dataclasses import dataclass
+import json
 import math
 import os
 from pathlib import Path
@@ -131,6 +132,12 @@ def parse_config_text(text: str, source: str | Path) -> Config:
 
 
 EDITABLE_FIELDS = {
+    "music_path": ("music", "path"),
+    "bpm": ("rhythm", "bpm"),
+    "beat_start_seconds": ("rhythm", "beat_start_seconds"),
+    "beats_per_bar": ("rhythm", "beats_per_bar"),
+    "note_values": ("rhythm", "note_values"),
+    "lead_in_bars": ("rhythm", "lead_in_bars"),
     "beat_offset_ms": ("rhythm", "beat_offset_ms"),
     "input_offset_ms": ("judgment", "input_offset_ms"),
     "window_ms": ("judgment", "window_ms"),
@@ -140,8 +147,48 @@ EDITABLE_FIELDS = {
 }
 
 
+def _toml_value_end(text, start):
+    """找到值末端，区分字符串内的 #、数组内注释与真正的行内注释。"""
+    position = start
+    depth = 0
+    quote = None
+    comments = []
+    while position < len(text):
+        char = text[position]
+        if quote is not None:
+            if quote[0] == '"' and char == "\\":
+                position += 2
+                continue
+            if text.startswith(quote, position):
+                position += len(quote)
+                quote = None
+                continue
+        elif char in ("'", '"'):
+            quote = char * (3 if text.startswith(char * 3, position) else 1)
+            position += len(quote)
+            continue
+        elif char in "[{":
+            depth += 1
+        elif char in "]}":
+            depth -= 1
+        elif char == "#":
+            if depth == 0:
+                break
+            end = text.find("\n", position)
+            end = len(text) if end == -1 else end
+            comments.append(text[position:end].rstrip("\r"))
+            position = end
+            continue
+        elif char in "\r\n" and depth == 0:
+            break
+        position += 1
+    while position > start and text[position - 1].isspace():
+        position -= 1
+    return position, comments
+
+
 def prepare_config_update(path, updates, expected_text):
-    """仅改页面负责的数字字段；保留素材、其他配置及行内注释。"""
+    """批量校验设置并生成 TOML；保留其他字段与注释，不立即写入。"""
     source = Path(path).resolve()
     original = source.read_text(encoding="utf-8")
     if original != expected_text:
@@ -150,30 +197,62 @@ def prepare_config_update(path, updates, expected_text):
         raise ValueError("设置包含未知或空字段")
     replacements = {}
     for name, value in updates.items():
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
-            raise ValueError(f"{name} 必须是有限数字")
-        if name == "blocksize":
-            if int(value) != value:
-                raise ValueError("音频缓冲必须为整数")
-            value = int(value)
-        replacements[EDITABLE_FIELDS[name]] = str(value)
+        if name == "music_path":
+            if not isinstance(value, (str, Path)) or not str(value).strip():
+                raise ValueError("music_path 必须是非空音乐路径")
+            music_path = (source.parent / value).resolve()
+            try:
+                stored_path = music_path.relative_to(source.parent)
+            except ValueError:
+                stored_path = music_path
+            serialized = json.dumps(str(stored_path), ensure_ascii=False)
+        elif name == "note_values":
+            if not isinstance(value, (list, tuple)) or not value:
+                raise ValueError("note_values 必须是非空整数数组")
+            if any(isinstance(n, bool) or not isinstance(n, int)
+                   or n not in (1, 2, 4, 8, 16, 32, 64) for n in value):
+                raise ValueError("note_values 只接受 1、2、4、8、16、32、64 的常规音符分母")
+            serialized = json.dumps(list(value))
+        else:
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                raise ValueError(f"{name} 必须是有限数字")
+            if name in ("blocksize", "beats_per_bar", "lead_in_bars"):
+                if int(value) != value:
+                    raise ValueError(f"{name} 必须为整数")
+                value = int(value)
+            serialized = str(value)
+        replacements[EDITABLE_FIELDS[name]] = serialized
+
     section = None
-    lines = []
-    for line in original.splitlines(keepends=True):
+    position = 0
+    copied_until = 0
+    parts = []
+    while position < len(original):
+        end = original.find("\n", position)
+        end = len(original) if end == -1 else end + 1
+        line = original[position:end]
         header = re.match(r"\s*\[([^\]]+)\]", line)
         if header:
             section = header[1]
-        assignment = re.match(r"(\s*)(\w+)(\s*=\s*)([^#\r\n]*)(.*)", line.rstrip("\r\n"))
-        if assignment and (section, assignment[2]) in replacements:
-            value_part = assignment[4]
-            spacing = value_part[len(value_part.rstrip()):]
-            newline = "\n" if line.endswith("\n") else ""
-            line = (assignment[1] + assignment[2] + assignment[3]
-                    + replacements.pop((section, assignment[2])) + spacing + assignment[5] + newline)
-        lines.append(line)
+        assignment = re.match(r"([ \t]*)(\w+)([ \t]*=[ \t]*)", line)
+        if assignment:
+            value_start = position + assignment.end()
+            value_end, comments = _toml_value_end(original, value_start)
+            key = (section, assignment[2])
+            if key in replacements:
+                parts.append(original[copied_until:position])
+                # 多行数组转为单行时，将其内部注释放在字段前，避免丢失说明。
+                parts.extend(assignment[1] + comment + "\n" for comment in comments)
+                parts.append(original[position:value_start])
+                parts.append(replacements.pop(key))
+                copied_until = value_end
+            end = original.find("\n", value_end)
+            end = len(original) if end == -1 else end + 1
+        position = end
     if replacements:
         raise ValueError("配置中缺少待修改字段")
-    updated = "".join(lines)
+    parts.append(original[copied_until:])
+    updated = "".join(parts)
     return updated, parse_config_text(updated, source)
 
 

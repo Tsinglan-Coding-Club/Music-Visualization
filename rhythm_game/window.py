@@ -115,7 +115,7 @@ class RhythmWindow(arcade.Window):
             for cy in (y + radius, y + height - radius):
                 self._circle(cx, cy, radius, color)
 
-    def _card(self, rect, color=PANEL, radius=16, border=None):
+    def _card(self, rect, color=PANEL, radius=0, border=LINE):
         if border is not None:
             self._rounded_fill(rect, border, radius)
             x, y, width, height = rect
@@ -160,7 +160,7 @@ class RhythmWindow(arcade.Window):
         chart = self.controller.chart
         session = self.controller.session
         for staff_y in (233, 245, 257, 269, 281):
-            self._line(210, staff_y, 1110, staff_y, (83, 99, 125), 1)
+            self._line(210, staff_y, 1110, staff_y, (150, 150, 150), 1)
         self._line(210, 233, 210, 281, MUTED, 1.5)
         self._line(1110, 233, 1110, 281, MUTED, 1.5)
         self._text("signature-top", cfg.beats_per_bar, 172, 231, 24, TEXT, anchor_x="center")
@@ -221,9 +221,10 @@ class RhythmWindow(arcade.Window):
         reading = app.engine.reading()
         position = reading.position if reading.generation == app.expected_generation else 0.0
         bar = app.chart.bar_at(position)
-        self._text("title", "主音归来", 64, 32, 28)
+        self._text("title", "主音归来 · 节奏 demo", 64, 25, 24)
+        self._text("track", cfg.music_path.name, 64, 64, 15, MUTED, max_width=850)
         self._text("bpm", f"{cfg.bpm:g} BPM", 1096, 41, 16, MUTED, anchor_x="right")
-        self._card(self._settings_button, (35, 44, 62), 9)
+        self._card(self._settings_button)
         self._text("settings-entry", "设置", 1162, 39, 17)
 
         title, detail, color = app.feedback
@@ -255,7 +256,7 @@ class RhythmWindow(arcade.Window):
         self._staff(position, bar)
         line_y, top_y = 650, 340
         for x in (480, 800):
-            self._line(x, top_y, x, line_y, (32, 40, 57))
+            self._line(x, top_y, x, line_y, (225, 225, 225))
         for target in app.chart.visible_targets(position, cfg.lookahead_seconds, 0.25):
             if (session.entry_time is None or session.finished
                     or not session.entry_time <= target.time < session.round_end_time):
@@ -273,8 +274,8 @@ class RhythmWindow(arcade.Window):
                 label = "重播" if app.desired_playing or app.paused else "播放"
             elif action == "toggle_pause":
                 label = "继续" if app.paused else "暂停"
-            self._card(rect, GREEN if primary else (35, 44, 62), 9)
-            self._text(("button", index), label, rect[0] + 42, rect[1] + 12, 18, BG if primary else TEXT)
+            self._card(rect)
+            self._text(("button", index), label, rect[0] + 42, rect[1] + 12, 18, TEXT)
         if app.desired_playing:
             hint = "空格备用" if app.glove is not None else "空格 · 拍手"
             self._text("clap-key", hint, 1216, 751, 16, MUTED, anchor_x="right")
@@ -321,11 +322,9 @@ class RhythmWindow(arcade.Window):
             self.controller.auto_input = False
             self._settings = SettingsPage(self)
 
-    def close_settings(self):
-        if self._settings is not None and self._settings.calibrating:
-            self._settings.calibrating = False
-            self.controller.stop()
-            self.controller.record("calibration_cancel")
+    def close_settings(self, saved=False):
+        if self._settings is not None and not self._settings.leave(saved):
+            return
         self._settings = None
 
     def on_text(self, text):
