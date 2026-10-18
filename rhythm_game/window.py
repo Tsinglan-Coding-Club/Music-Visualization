@@ -31,7 +31,7 @@ class RhythmWindow(arcade.Window):
         self._text_sources = {}
         self._buttons = []
         self._settings = None
-        self._settings_button = (862, 30, 150, 40)
+        self._settings_button = (1128, 28, 104, 40)
         self._camera = None
         self._scale = 1.0
         self._offset_x = 0.0
@@ -62,9 +62,9 @@ class RhythmWindow(arcade.Window):
             )
             self._resize_layout(self.width, self.height)
             self._buttons = [
-                ((40, 749, 174, 43), "播放 / 重来", "start", True),
-                ((226, 749, 132, 43), "暂停 / 继续", "toggle_pause", False),
-                ((370, 749, 148, 43), "清空本轮", "reset_round", False),
+                ((64, 736, 120, 44), "播放", "start", True),
+                ((196, 736, 120, 44), "暂停", "toggle_pause", False),
+                ((328, 736, 120, 44), "重置", "reset_round", False),
             ]
         except Exception:
             self.close()
@@ -159,21 +159,18 @@ class RhythmWindow(arcade.Window):
         cfg = self.controller.config
         chart = self.controller.chart
         session = self.controller.session
-        self._text("staff-caption", "节奏示意 · 固定音高", 474, 204, 12, MUTED)
         for staff_y in (233, 245, 257, 269, 281):
-            self._line(548, staff_y, 1192, staff_y, (83, 99, 125), 1)
-        self._line(548, 233, 548, 281, MUTED, 1.5)
-        self._line(1192, 233, 1192, 281, MUTED, 1.5)
-        self._text("signature-top", cfg.beats_per_bar, 514, 231, 24, TEXT, anchor_x="center")
-        self._text("signature-bottom", "4", 514, 259, 24, TEXT, anchor_x="center")
-        self._text("staff-beat-label", "拍数", 474, 292, 11, MUTED)
-        self._text("staff-order-label", "序号", 474, 313, 11, (106, 122, 148))
+            self._line(210, staff_y, 1110, staff_y, (83, 99, 125), 1)
+        self._line(210, 233, 210, 281, MUTED, 1.5)
+        self._line(1110, 233, 1110, 281, MUTED, 1.5)
+        self._text("signature-top", cfg.beats_per_bar, 172, 231, 24, TEXT, anchor_x="center")
+        self._text("signature-bottom", "4", 172, 259, 24, TEXT, anchor_x="center")
         offsets = []
         elapsed = 0.0
         for value in cfg.note_values:
             offsets.append(elapsed)
             elapsed += 4 / value
-        note_xs = [585 + offset / cfg.beats_per_bar * 570 for offset in offsets]
+        note_xs = [255 + offset / cfg.beats_per_bar * 820 for offset in offsets]
         entry_bar = chart.bar_at(session.entry_time) if session.entry_time is not None else None
         current_bar = entry_bar[0] if entry_bar else bar[0] if bar else 1
         stem_top, note_y = 219, 257
@@ -209,7 +206,6 @@ class RhythmWindow(arcade.Window):
                         arcade.draw_polygon_filled([self._point(*point) for point in points], color)
             beat_label = str(int(offset) + 1) if offset.is_integer() else "&" if (offset * 2).is_integer() else f"{offset + 1:g}"
             self._text(("staff-beat", index), beat_label, note_x, 292, 14, MUTED, anchor_x="center")
-            self._text(("staff-order", index), str(index + 1), note_x, 313, 11, (106, 122, 148), anchor_x="center")
 
     def on_draw(self):
         if self._closed_once:
@@ -221,90 +217,72 @@ class RhythmWindow(arcade.Window):
             return
         app = self.controller
         cfg = app.config
+        session = app.session
         reading = app.engine.reading()
         position = reading.position if reading.generation == app.expected_generation else 0.0
         bar = app.chart.bar_at(position)
-        self._text("title", "主音归来", 40, 28, 34)
-        self._text("subtitle", "节奏练习  /  第 1 阶段", 218, 42, 17, MUTED)
+        self._text("title", "主音归来", 64, 32, 28)
+        self._text("bpm", f"{cfg.bpm:g} BPM", 1096, 41, 16, MUTED, anchor_x="right")
         self._card(self._settings_button, (35, 44, 62), 9)
-        self._text("settings-entry", "设置 / 校准", 878, 40, 17)
-        self._card((1032, 30, 208, 40), (27, 51, 46), 20)
-        self._text("input-mode", "自动软件验证" if app.auto_input else "键盘输入 · 手套未接入", 1050, 39, 16, GREEN)
+        self._text("settings-entry", "设置", 1162, 39, 17)
 
-        self._card((40, 106, 384, 624))
-        self._text("rules-heading", "HOW TO PLAY", 64, 129, 14, PURPLE)
-        self._text("rules-title", "跟随音乐，拍出节奏", 64, 158, 26)
-        rules = [
-            ("播放音乐", "Enter 开始；音乐从文件开头播放"),
-            ("第一拍拍手启动", "任意小节第一拍按空格，先预备一小节" if cfg.lead_in_bars else "任意小节第一拍按空格，立即开始"),
-            ("正式打一个小节", "跟随短线；到线再拍，不需长按"),
-        ]
-        for index, (title, detail) in enumerate(rules):
-            y = 218 + index * 68
-            self._card((64, y + 2, 32, 32), (42, 43, 67), 10)
-            self._text(("rule-number", index), f"0{index + 1}", 70, y + 8, 13, PURPLE)
-            self._text(("rule-title", index), title, 110, y, 19)
-            self._text(("rule-detail", index), detail, 110, y + 29, 14, MUTED)
         title, detail, color = app.feedback
-        if title in ("预备一小节", "预备中") and app.session.entry_time is not None and position >= app.session.entry_time:
-            title, detail, color = "正式开始", "跟随短线，打完这一个小节", GREEN
-        self._card((64, 442, 336, 137), (28, 36, 51), border=color)
-        self._text("feedback-title", title, 84, 459, 32, color, max_width=296)
-        self._text("feedback-detail", detail, 84, 514, 15, MUTED, max_width=296)
-        self._text("hits-label", "命中", 67, 606, 15, MUTED)
-        self._text("hits", f"{app.session.hits:03d}", 64, 631, 36, GREEN)
-        self._text("misses-label", "漏拍", 220, 606, 15, MUTED)
-        self._text("misses", f"{app.session.misses:03d}", 217, 631, 36, RED)
-        self._text("window", f"试用容差 ±{cfg.window_ms:g} ms", 64, 697, 14, MUTED)
+        errors = {"配置未加载", "设置未保存", "设置未应用", "音频设备无法停止",
+                  "音频设备无法打开", "音频输出已中断"}
+        preparing = session.entry_time is not None and position < session.entry_time
+        if title in errors:
+            self._text("error-title", title, 640, 426, 26, RED, anchor_x="center")
+            self._text("error-detail", detail, 640, 470, 14, MUTED, max_width=1000, anchor_x="center")
+        elif app.paused:
+            self._text("entry-prompt", "已暂停", 640, 438, 28, MUTED, anchor_x="center")
+        elif not app.desired_playing:
+            prompt = "播放结束" if position >= app.engine.duration else "按 Enter 播放"
+            self._text("entry-prompt", prompt, 640, 438, 26, MUTED, anchor_x="center")
+        elif session.entry_time is None:
+            self._text("entry-prompt", "第一拍拍手开始", 640, 438, 26, MUTED, anchor_x="center")
+        elif preparing:
+            beats_left = max(1, math.ceil((session.entry_time - position) / app.chart.beat_seconds))
+            self._text("feedback", f"预备 · {beats_left}", 64, 110, 26, PURPLE)
+        elif session.finished:
+            self._text("entry-prompt", "本小节完成", 640, 438, 28, GREEN, anchor_x="center")
+        else:
+            feedback = "开始" if title in ("预备一小节", "预备中") else title
+            self._text("feedback", feedback, 64, 110, 26, color)
+        if session.entry_time is not None:
+            self._text("score", f"命中 {session.hits}   漏拍 {session.misses}",
+                       1216, 116, 18, MUTED, anchor_x="right")
 
-        self._card((448, 106, 792, 624))
-        self._text("bpm", f"{cfg.bpm:g}", 474, 121, 40)
-        self._text("bpm-label", "BPM", 582, 145, 14, MUTED)
-        bar_label = f"第 {bar[0]:02d} 小节" if bar else "曲目已结束" if position >= app.engine.duration else "等待第一小节"
-        self._text("bar", bar_label, 660, 128, 21)
-        self._text("chart-start", f"首拍 {app.chart.start:.3f}s · 偏移 {cfg.beat_offset_ms:+g}ms", 660, 161, 14, MUTED)
-        for index in range(cfg.beats_per_bar):
-            x = 1055 + index * min(28, 145 / cfg.beats_per_bar)
-            active = bar is not None and int(bar[1] - 1) == index
-            self._circle(x, 146, 6, GREEN if active else LINE)
-        self._line(474, 200, 1214, 200, LINE)
         self._staff(position, bar)
-        caption = "正式小节 · 短线到达判定线时拍掌" if app.session.entry_time is not None else "等待第一拍拍手 · 拍手后出现本小节短线"
-        self._text("lane-caption", caption, 474, 337, 13, MUTED)
-        line_y, top_y = 644, 360
-        for x in (700, 990):
+        line_y, top_y = 650, 340
+        for x in (480, 800):
             self._line(x, top_y, x, line_y, (32, 40, 57))
-        slot = 0
         for target in app.chart.visible_targets(position, cfg.lookahead_seconds, 0.25):
-            if (app.session.entry_time is None or app.session.finished
-                    or not app.session.entry_time <= target.time < app.session.round_end_time):
+            if (session.entry_time is None or session.finished
+                    or not session.entry_time <= target.time < session.round_end_time):
                 continue
             y = line_y - (target.time - position) / cfg.lookahead_seconds * (line_y - top_y)
-            if y < top_y or y > 670:
+            if y < top_y or y > 675:
                 continue
-            state = app.session.states.get(target.index)
+            state = session.states.get(target.index)
             color = GREEN if state == "hit" else RED if state == "miss" else PURPLE
-            # 所有目标使用同一条短线；线宽和厚度均不编码音符／接触时长。
-            self._line(790, y, 900, y, color, 5)
-            ordinal = target.index % len(cfg.note_values) + 1
-            self._text(("falling-order", slot), f"{ordinal} · {target.time:.2f}s", 931, y - 9, 13, MUTED)
-            slot += 1
-        self._line(670, line_y, 1020, line_y, GREEN, 3)
-        self._text("judgment-line", "判定线", 1070, line_y - 12, 16, GREEN)
-        if app.session.entry_time is None:
-            self._text("entry-prompt", "在小节第一拍拍手开始", 845, 445, 25, MUTED, anchor_x="center")
-        elif position < app.session.entry_time:
-            beats_left = max(1, math.ceil((app.session.entry_time - position) / app.chart.beat_seconds))
-            self._text("entry-prompt", f"预备 {beats_left} 拍", 590, 407, 25, GREEN, anchor_x="center")
-            self._text("entry-prompt-detail", "下一小节正式开始", 590, 447, 14, MUTED, anchor_x="center")
-        elif app.session.finished:
-            self._text("entry-prompt", "本小节完成", 845, 445, 25, GREEN, anchor_x="center")
-        self._text("position", f"{position:06.2f} / {app.engine.duration:.2f}s", 474, 690, 15)
-        self._text("output-health", f"输出延迟估计 {app.engine.latency_ms:.1f}ms  ·  欠载 {app.engine.underruns}", 800, 692, 13, MUTED)
-        for index, (rect, label, action, primary) in enumerate(self._buttons):
+            self._line(585, y, 695, y, color, 5)
+        self._line(450, line_y, 830, line_y, GREEN, 3)
+        self._line(64, 714, 1216, 714, LINE)
+        for index, (rect, label, action, primary) in enumerate(self._game_buttons()):
+            if action == "start":
+                label = "重播" if app.desired_playing or app.paused else "播放"
+            elif action == "toggle_pause":
+                label = "继续" if app.paused else "暂停"
             self._card(rect, GREEN if primary else (35, 44, 62), 9)
-            self._text(("button", index), label, rect[0] + 18, rect[1] + 11, 18, BG if primary else TEXT)
-        self._text("shortcuts", "P 暂停  ·  R 清空本轮  ·  S 停止  ·  F5 加载配置", 554, 762, 15, MUTED)
+            self._text(("button", index), label, rect[0] + 42, rect[1] + 12, 18, BG if primary else TEXT)
+        if app.desired_playing:
+            self._text("clap-key", "空格 · 拍手", 1216, 751, 16, MUTED, anchor_x="right")
+
+    def _game_buttons(self):
+        app = self.controller
+        return [button for button in self._buttons
+                if not (button[2] == "toggle_pause" and not (app.desired_playing or app.paused))
+                and not (button[2] == "reset_round" and app.session.entry_time is None)]
 
     def on_key_press(self, symbol, modifiers):
         host_time = perf_counter()
@@ -371,7 +349,7 @@ class RhythmWindow(arcade.Window):
         if left <= design_x <= left + width and top <= design_y <= top + height:
             self.open_settings()
             return
-        for (left, top, width, height), label, action, primary in self._buttons:
+        for (left, top, width, height), label, action, primary in self._game_buttons():
             if left <= design_x <= left + width and top <= design_y <= top + height:
                 getattr(self.controller, action)()
                 break
