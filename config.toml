@@ -1,0 +1,42 @@
+# 游戏内 F1 可调整与校准；直接修改本文件后按 F5 重载。路径相对于本文件。
+[music]
+path = "music/Rhythm hot pot vocal1001.mp3"
+volume = 0.65
+
+[rhythm]
+bpm = 90.0                         # 示例曲目参数；可在设置页手动修改或速度校准
+beat_start_seconds = 4.0           # 当前曲目的首拍位置；换曲后请手动设置或校准
+beat_offset_ms = 0.0               # 整曲拍点偏差：正值向后移，负值向前移，单位毫秒
+beats_per_bar = 4                  # 可改每小节四分拍数；note_values 须同时填满小节
+game_bars = 4                     # 一个正式游戏包含的小节数；预备小节另计
+# 练习谱面：普通数字为分母，"8." 为附点八分；每个数组恰好填满一个小节。
+# 多个谱面小节按顺序循环；这些是 demo 节奏，不是音乐自动提取的正式谱。
+note_values = [8, 16, 16, "8.", 16, 16, 16, 8, 4]
+patterns = [
+    [8, 16, 16, "8.", 16, 16, 16, 8, 4],
+    [16, 16, 8, 16, "8.", 8, 16, 16, 4],
+    ["4.", 8, 4, 4],
+    [4, "8.", 16, 8, 16, 16, 4],
+]
+
+[judgment]
+window_ms = 100.0                  # 首版试用容差，不是已确认的演出验收值
+max_mistakes = 3                   # 正式出错四分拍达到此数即输掉；每拍最多计 1，0 不限
+input_offset_ms = 0.0              # 输入延迟补偿：正值从输入时间中减去；与整曲偏移分开
+
+[audio]
+device = ""                       # 空字符串使用系统默认输出；可填 --list-devices 中的名称
+blocksize = 128                    # 可尝试 0（设备自动）、64、128、256；需实测稳定性
+clap_path = ""                    # 空字符串使用程序生成的短拍手声；可换成 WAV/MP3
+clap_volume = 0.45
+
+[display]
+width = 1280
+height = 800
+lookahead_seconds = 3.0
+
+[glove]
+enabled = true
+port = ""                         # 留空自动选择唯一 USB 串口；多个设备时填写具体端口
+baudrate = 115200
+debounce_ms = 30.0                 # 接触和松开均稳定此时长后才确认
