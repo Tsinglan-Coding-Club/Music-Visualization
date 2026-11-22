@@ -20,22 +20,28 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(cfg.bpm, 90)
         self.assertEqual(cfg.beat_start_seconds, 4)
         self.assertEqual(cfg.beat_offset_ms, 0)
-        self.assertFalse(cfg.glove_enabled)
+        self.assertFalse(cfg.input_enabled)
+        self.assertEqual(cfg.input_socket_path, "tmp/joycon-clap.sock")
+        self.assertEqual(cfg.input_max_age_ms, 250)
 
-    def test_glove_config_survives_settings_save(self):
-        original = CONFIG_TEXT + '\n[glove]\nenabled = true\nport = "COM7"\n'
+    def test_input_config_survives_settings_save(self):
+        original = (CONFIG_TEXT + '\n[input]\nenabled = true\n'
+                    'socket_path = "tmp/custom.sock"\nmax_age_ms = 200\n')
         path = write_config(self.root, original)
         text, config = prepare_config_update(path, {"beat_offset_ms": 30}, original)
-        self.assertTrue(config.glove_enabled)
-        self.assertEqual(config.glove_port, "COM7")
-        self.assertEqual(config.glove_baudrate, 115200)
-        self.assertEqual(config.glove_debounce_ms, 30)
-        self.assertIn('port = "COM7"', text)
+        self.assertTrue(config.input_enabled)
+        self.assertEqual(config.input_socket_path, "tmp/custom.sock")
+        self.assertEqual(config.input_max_age_ms, 200)
+        self.assertIn('socket_path = "tmp/custom.sock"', text)
 
-    def test_glove_rejects_invalid_boolean_and_timing(self):
-        for field in ('enabled = "true"', 'debounce_ms = nan', 'debounce_ms = -1', 'baudrate = 115200.5'):
+    def test_input_rejects_invalid_boolean_path_and_timing(self):
+        for field in ('enabled = "true"', 'socket_path = ""', 'max_age_ms = nan', 'max_age_ms = 0'):
             with self.subTest(field=field), self.assertRaises(ValueError):
-                load_config(write_config(self.root, CONFIG_TEXT + '\n[glove]\n' + field + '\n'))
+                load_config(write_config(self.root, CONFIG_TEXT + '\n[input]\n' + field + '\n'))
+
+    def test_legacy_glove_section_is_rejected_with_migration_hint(self):
+        with self.assertRaisesRegex(ValueError, "Joy-Con"):
+            load_config(write_config(self.root, CONFIG_TEXT + '\n[glove]\nenabled = true\n'))
 
     def test_global_and_input_offsets_are_independent(self):
         text = CONFIG_TEXT.replace("beat_offset_ms = 0.0", "beat_offset_ms = -50.0")
@@ -239,6 +245,11 @@ class ConfigTests(unittest.TestCase):
         self.assertEqual(config.note_values, (2, 2))
         self.assertEqual(config.patterns, ((2, 2), (1,)))
 
+    def test_game_bars_zero_means_auto(self):
+        text = CONFIG_TEXT.replace("beats_per_bar = 4\n", "beats_per_bar = 4\ngame_bars = 0\n")
+        cfg = load_config(write_config(self.root, text))
+        self.assertEqual(cfg.game_bars, 0)
+
     def test_invalid_dotted_patterns_or_new_option_types_rejected(self):
         path = write_config(self.root)
         invalid = [
@@ -246,7 +257,7 @@ class ConfigTests(unittest.TestCase):
             {"note_values": ["8.", 4]}, {"patterns": []}, {"patterns": [[], [1]]},
             {"patterns": [[4, 8, 8, 4, 4], ["4.", 4]]},
             {"patterns": [[4, 8, 8, 4, 4], [True]]},
-            {"game_bars": 0}, {"game_bars": -1}, {"game_bars": 129},
+            {"game_bars": -1}, {"game_bars": 129},
             {"game_bars": 2.5}, {"game_bars": True},
             {"max_mistakes": -1}, {"max_mistakes": 1000}, {"max_mistakes": 1.5},
             {"max_mistakes": False},

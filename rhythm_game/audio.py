@@ -7,6 +7,7 @@
 from collections import deque
 from dataclasses import dataclass
 import math
+import sys
 from time import perf_counter
 
 import numpy as np
@@ -39,6 +40,8 @@ def generated_clap(sample_rate: int, channels: int) -> np.ndarray:
 
 class AudioEngine:
     """UI 发送短命令，音频线程独占播放游标和音效声部。"""
+
+    _warned_latency = set()
 
     def __init__(self, config: Config):
         self.config = config
@@ -77,9 +80,12 @@ class AudioEngine:
         self._end_marker = None
 
     def open(self):
+        device = self.config.device
+        if isinstance(device, str) and device.strip().isdigit():
+            device = int(device.strip())
         self.stream = sd.OutputStream(
             samplerate=self.sample_rate, channels=self.channels, dtype="float32",
-            blocksize=self.config.blocksize, latency="low", device=self.config.device,
+            blocksize=self.config.blocksize, latency="low", device=device,
             callback=self._callback,
         )
         try:
@@ -92,6 +98,18 @@ class AudioEngine:
             self.stream.close()
             self.stream = None
             raise
+        latency = self.latency_ms
+        if latency > 30:
+            try:
+                name = sd.query_devices(self.stream.device)["name"]
+            except Exception:
+                name = str(self.stream.device)
+            key = (name, round(latency, 1))
+            if key not in AudioEngine._warned_latency:
+                AudioEngine._warned_latency.add(key)
+                print(f"音频输出延迟较高：{latency:.1f} ms（{name}）。"
+                      "蓝牙耳机通常 >100ms，建议在 config.toml 的 [audio] device "
+                      "选择内置扬声器或有线耳机。", file=sys.stderr)
 
     @property
     def latency_ms(self):

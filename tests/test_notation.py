@@ -4,7 +4,8 @@ from dataclasses import FrozenInstanceError
 from fractions import Fraction
 import unittest
 
-from rhythm_game.notation import RhythmNote, format_pattern, normalize_pattern, parse_note, parse_pattern
+from rhythm_game.notation import (RhythmNote, RhythmRest, format_pattern, normalize_pattern,
+                                 parse_event, parse_note, parse_pattern)
 
 
 class NotationTests(unittest.TestCase):
@@ -44,6 +45,24 @@ class NotationTests(unittest.TestCase):
         for value in (None, "4,4", 4):
             with self.assertRaises(ValueError):
                 normalize_pattern(value, 4)
+
+    def test_rest_tokens_and_aliases(self):
+        self.assertEqual(parse_event("r4").beats, Fraction(1))
+        self.assertEqual(parse_event("r8").beats, Fraction(1, 2))
+        self.assertEqual(parse_event("r8.").beats, Fraction(3, 4))
+        self.assertEqual(parse_event("r16").token, "r16")
+        self.assertEqual(parse_event("0").token, "r4")
+        self.assertEqual(parse_event("0.").token, "r4.")
+        self.assertIsInstance(parse_event("r8"), RhythmRest)
+        self.assertEqual(normalize_pattern([4, "r4", 4, 4], 4), (4, "r4", 4, 4))
+        self.assertEqual(normalize_pattern(["r8", 8, "r8", 8, 4, 4], 4),
+                         ("r8", 8, "r8", 8, 4, 4))
+        patterns = parse_pattern("4, r4, 4, 4 | r8, 8, r8, 8, 4, 4")
+        self.assertEqual(patterns, ((4, "r4", 4, 4), ("r8", 8, "r8", 8, 4, 4)))
+        self.assertEqual(parse_pattern(format_pattern(patterns)), patterns)
+        for value in ("r0", "r3", "r128", "r8....", "r", "r8x"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_event(value)
 
     def test_multi_bar_parser_preserves_independent_patterns(self):
         text = "8.,16 4，4 | 16, 16,8 4 4"

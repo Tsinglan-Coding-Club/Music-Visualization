@@ -1,8 +1,12 @@
 """白底 demo 设置：曲目、可编辑节奏与两种跟拍校准。"""
 
 import math
+import os
 from pathlib import Path
+import subprocess
+import sys
 import textwrap
+from time import perf_counter
 
 import arcade
 
@@ -10,6 +14,55 @@ from .app import BG, PANEL, LINE, TEXT, MUTED, GREEN, PURPLE, RED
 from .calibration import BeatCalibrator, TempoCalibrator
 from .music_library import discover_music
 from .notation import parse_pattern, normalize_pattern, format_pattern
+
+
+_INPUT_FONTS = ("PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", "Heiti SC", "Arial")
+
+
+def _clipboard_get():
+    """读取系统剪贴板；没有可用工具时返回空字符串。"""
+    try:
+        if sys.platform == "darwin":
+            result = subprocess.run(["pbpaste"], capture_output=True, text=True, timeout=.5)
+        elif os.name == "nt":
+            result = subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "Get-Clipboard"],
+                capture_output=True, text=True, timeout=.8,
+            )
+        else:
+            result = subprocess.run(
+                ["xclip", "-selection", "clipboard", "-o"],
+                capture_output=True, text=True, timeout=.5,
+            )
+            if result.returncode != 0:
+                result = subprocess.run(
+                    ["wl-paste", "--no-newline"],
+                    capture_output=True, text=True, timeout=.5,
+                )
+        return result.stdout if result.returncode == 0 else ""
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def _clipboard_set(text):
+    """写入系统剪贴板；失败时静默，不影响游戏。"""
+    try:
+        if sys.platform == "darwin":
+            subprocess.run(["pbcopy"], input=text, text=True, timeout=.5, check=False)
+        elif os.name == "nt":
+            subprocess.run(
+                ["powershell", "-NoProfile", "-Command", "Set-Clipboard"],
+                input=text, text=True, timeout=.8, check=False,
+            )
+        else:
+            result = subprocess.run(
+                ["xclip", "-selection", "clipboard"], input=text, text=True,
+                timeout=.5, check=False,
+            )
+            if result.returncode != 0:
+                subprocess.run(["wl-copy"], input=text, text=True, timeout=.5, check=False)
+    except (OSError, subprocess.SubprocessError):
+        pass
 
 
 # name, title, unit, step; 无步进的字段直接输入。
@@ -53,7 +106,9 @@ class SettingsPage:
         self.values["music_path"] = str(self.app.config.music_path)
         self.tab = "music"
         self.focus = None
-        self.select_all = False
+        self.cursor = 0
+        self.anchor = 0
+        self._ignore_text_until = 0.0
         self.calibrator = None
         self.calibration_kind = "tempo"
         self.calibrating = False
@@ -98,19 +153,188 @@ class SettingsPage:
             self.calibrator = None
         self._message("")
 
+    def _focus(self, name, select_all=False, cursor=None):
+        self.focus = name
+        value = self.values[name]
+        if select_all:
+            self.anchor, self.cursor = 0, len(value)
+        elif cursor is not None:
+            self.cursor = max(0, min(len(value), cursor))
+            self.anchor = self.cursor
+        else:
+            self.cursor = self.anchor = len(value)
+
+    def _clamp_edit(self):
+        if self.focus is None:
+            return
+        length = len(self.values[self.focus])
+        self.cursor = max(0, min(length, self.cursor))
+        self.anchor = max(0, min(length, self.anchor))
+
+    def _selection(self):
+        return tuple(sorted((self.anchor, self.cursor)))
+
+    def _has_selection(self):
+        return self.anchor != self.cursor
+
+    @property
+    def select_all(self):
+        if self.focus is None:
+            return False
+        return (self.anchor != self.cursor
+                and self._selection() == (0, len(self.values[self.focus])))
+
+    @select_all.setter
+    def select_all(self, value):
+        if self.focus is None:
+            return
+        if value:
+            self.anchor, self.cursor = 0, len(self.values[self.focus])
+        else:
+            self.anchor = self.cursor
+
+    def _sanitize(self, name, value):
+        value = str(value).replace("\r", "").replace("\n", " ").replace("\t", " ")
+        if name == "music_path":
+            return "".join(char for char in value if char.isprintable())
+        if name == "note_values":
+            return "".join(char for char in value if char in "0123456789,， .|rR")
+        return "".join(char for char in value if char in "0123456789.-+")
+
+    def _insert_text(self, value):
+        if self.focus is None:
+            return
+        name = self.focus
+        value = self._sanitize(name, value)
+        if not value:
+            return
+        start, end = self._selection()
+        old = self.values[name]
+        limit = 4096 if name in ("music_path", "note_values") else 16
+        new = (old[:start] + value + old[end:])[:limit]
+        self.values[name] = new
+        self.cursor = self.anchor = min(start + len(value), len(new))
+        self._edited(name)
+
+    def _delete_edit(self, backwards):
+        if self.focus is None:
+            return
+        name = self.focus
+        value = self.values[name]
+        start, end = self._selection()
+        if start == end:
+            if backwards:
+                if start == 0:
+                    return
+                start -= 1
+            else:
+                if end >= len(value):
+                    return
+                end += 1
+        self.values[name] = value[:start] + value[end:]
+        self.cursor = self.anchor = start
+        self._edited(name)
+
+    def _move_cursor(self, delta=None, to=None, select=False):
+        if self.focus is None:
+            return
+        length = len(self.values[self.focus])
+        new = max(0, min(length, self.cursor + delta)) if to is None else max(0, min(length, to))
+        if not select:
+            self.anchor = new
+        elif self.anchor == self.cursor:
+            self.anchor = self.cursor
+        self.cursor = new
+
+    def _copy(self, cut=False):
+        if self.focus is None:
+            return
+        name = self.focus
+        value = self.values[name]
+        start, end = self._selection()
+        if start == end:
+            start, end = 0, len(value)
+        _clipboard_set(value[start:end])
+        if cut:
+            self.values[name] = value[:start] + value[end:]
+            self.cursor = self.anchor = start
+            self._edited(name)
+        self._message("已剪切" if cut else "已复制", GREEN)
+
+    def _paste(self):
+        if self.focus is None:
+            return
+        text = _clipboard_get().strip("\r\n")
+        if text:
+            self._insert_text(text)
+            # 某些平台会同时派发 Cmd+V 键事件和文本事件；只插入一次。
+            self._ignore_text_until = perf_counter() + .08
+
+    def _text_width(self, text, size):
+        if not text:
+            return 0.0
+        return arcade.Text(text, 0, 0, font_size=size * .75,
+                           font_name=_INPUT_FONTS).content_width
+
+    def _view_start(self, text, cursor, size, max_width):
+        if self._text_width(text[:cursor], size) <= max_width - 16:
+            return 0
+        budget = max(4, max_width - 30)
+        for start in range(0, cursor + 1):
+            if self._text_width(text[start:cursor], size) <= budget:
+                return start
+        return cursor
+
+    def _caret_index(self, name, click_x, text_x, size, max_width):
+        text = self.values[name]
+        target = max(0.0, click_x - text_x)
+        view = self._view_start(text, self.cursor, size, max_width)
+        prefix = "…" if view else ""
+        best = view
+        best_error = target
+        for index in range(view, len(text) + 1):
+            width = self._text_width(prefix + text[view:index], size)
+            error = abs(width - target)
+            if error <= best_error:
+                best, best_error = index, error
+        return best
+
+    def _draw_edit(self, name, text_x, text_y, size, max_width, placeholder="", key=None):
+        text = self.values[name]
+        focused = self.focus == name
+        caret_top = text_y - 3
+        view = self._view_start(text, self.cursor, size, max_width) if focused else 0
+        prefix = "…" if view else ""
+        shown = prefix + text[view:]
+        if focused:
+            start, end = self._selection()
+            start, end = max(start, view), min(end, len(text))
+            if start < end:
+                left = self._text_width(prefix + text[view:start], size)
+                right = self._text_width(prefix + text[view:end], size)
+                self.window._rounded_fill((text_x + left, caret_top,
+                                           max(2, right - left), 24), (238, 228, 248), 4)
+        color = PURPLE if focused else (TEXT if text else MUTED)
+        self.window._text(key or ("field-value", name), shown or placeholder,
+                          text_x, text_y, size, color, max_width=max_width)
+        if focused:
+            caret = self._text_width(prefix + text[view:self.cursor], size)
+            self.window._line(text_x + caret, caret_top, text_x + caret,
+                              caret_top + 30, PURPLE, 2)
+
     def _step(self, name, direction):
         try:
             step = FIELD_MAP[name][3]
             value = self._number(name) + step * direction
             limits = {"bpm": (1, 600), "beats_per_bar": (1, 32), "beat_start_seconds": (0, math.inf),
-                      "game_bars": (1, 128), "max_mistakes": (0, 999), "input_offset_ms": (-1000, 1000), "window_ms": (1, 1000),
+                      "game_bars": (0, 128), "max_mistakes": (0, 999), "input_offset_ms": (-1000, 1000), "window_ms": (1, 1000),
                       "blocksize": (0, 8192), "music_volume": (0, 100), "clap_volume": (0, 100)}
             if name in limits:
                 lower, upper = limits[name]
                 value = max(lower, min(upper, value))
             self.values[name] = f"{round(value, 3):g}"
             self._edited(name)
-            self.focus, self.select_all = name, True
+            self._focus(name, select_all=True)
         except ValueError as exc:
             self._message(exc, RED)
 
@@ -232,6 +456,8 @@ class SettingsPage:
             self.finish_calibration()
 
     def key_press(self, symbol, modifiers, host_time):
+        command = modifiers & (arcade.key.MOD_CTRL | getattr(arcade.key, "MOD_COMMAND", 0))
+        shift = modifiers & arcade.key.MOD_SHIFT
         if symbol == arcade.key.ESCAPE:
             if self.choosing_music:
                 self.choosing_music = False
@@ -239,46 +465,63 @@ class SettingsPage:
                 self.window.close_settings()
         elif self.choosing_music:
             return
-        elif symbol == arcade.key.SPACE and self.focus != "music_path":
+        elif self.focus is not None and not self.calibrating:
+            name = self.focus
+            if command:
+                if symbol == arcade.key.A:
+                    self._focus(name, select_all=True)
+                    return
+                if symbol == arcade.key.C:
+                    self._copy()
+                    return
+                if symbol == arcade.key.X:
+                    self._copy(cut=True)
+                    return
+                if symbol == arcade.key.V:
+                    self._paste()
+                    return
+            if symbol == arcade.key.LEFT:
+                self._move_cursor(-1, select=bool(shift))
+                return
+            if symbol == arcade.key.RIGHT:
+                self._move_cursor(1, select=bool(shift))
+                return
+            if symbol == arcade.key.HOME:
+                self._move_cursor(to=0, select=bool(shift))
+                return
+            if symbol == arcade.key.END:
+                self._move_cursor(to=len(self.values[name]), select=bool(shift))
+                return
+            if symbol == arcade.key.BACKSPACE:
+                self._delete_edit(True)
+                return
+            if symbol == arcade.key.DELETE:
+                self._delete_edit(False)
+                return
+            if symbol in (arcade.key.UP, arcade.key.DOWN) and FIELD_MAP[name][3]:
+                self._step(name, 1 if symbol == arcade.key.UP else -1)
+                return
+        if symbol == arcade.key.SPACE and (self.calibrating or self.focus is None):
             self.tap(host_time)
         elif symbol == arcade.key.TAB and not self.calibrating:
             names = (("music_path",) if self.tab == "music" else ()) + TAB_FIELDS[self.tab]
             if names:
                 direction = -1 if modifiers & arcade.key.MOD_SHIFT else 1
                 index = names.index(self.focus) if self.focus in names else -1
-                self.focus = names[(index + direction) % len(names)]
-                self.select_all = True
+                self._focus(names[(index + direction) % len(names)], select_all=True)
         elif symbol in (arcade.key.ENTER, arcade.key.NUM_ENTER):
             if self.calibrating:
                 self.finish_calibration()
             else:
                 self.focus = None
-        elif self.focus is not None and not self.calibrating:
-            name = self.focus
-            if symbol in (arcade.key.BACKSPACE, arcade.key.DELETE):
-                self.values[name] = "" if self.select_all or symbol == arcade.key.DELETE else self.values[name][:-1]
-                self._edited(name)
-                self.select_all = False
-            elif symbol in (arcade.key.UP, arcade.key.DOWN) and name in FIELD_MAP and FIELD_MAP[name][3]:
-                self._step(name, 1 if symbol == arcade.key.UP else -1)
-            elif symbol == arcade.key.A and modifiers & (arcade.key.MOD_CTRL | getattr(arcade.key, "MOD_COMMAND", 0)):
-                self.select_all = True
 
     def text(self, value):
-        if self.focus is None or self.calibrating or self.choosing_music:
+        if (self.focus is None or self.calibrating or self.choosing_music
+                or perf_counter() < self._ignore_text_until):
             return
-        name = self.focus
-        if name == "music_path":
-            value = "".join(c for c in value if c.isprintable())
-        else:
-            allowed = "0123456789,， .|" if name == "note_values" else "0123456789.-+"
-            value = "".join(c for c in value if c in allowed)
-        if not value:
-            return
-        old = "" if self.select_all else self.values[name]
-        self.values[name] = (old + value)[:4096 if name == "music_path" else 4096 if name == "note_values" else 16]
-        self._edited(name)
-        self.select_all = False
+        value = self._sanitize(self.focus, value)
+        if value:
+            self._insert_text(value)
 
     def mouse_press(self, x, y):
         for rect, action, enabled in reversed(self._buttons):
@@ -292,7 +535,9 @@ class SettingsPage:
         if not self.calibrating:
             for name, (left, top, width, height) in self._field_rects.items():
                 if left <= x <= left + width and top <= y <= top + height:
-                    self.focus, self.select_all = name, True
+                    text_x = 60 if name == "music_path" else left + 10
+                    size = 17 if name == "music_path" else 19
+                    self._focus(name, cursor=self._caret_index(name, x, text_x, size, width - 20))
                     return
         self.focus = None
 
@@ -309,8 +554,7 @@ class SettingsPage:
         rect = (x, y + 29, width - 112, 42)
         self._field_rects[name] = rect
         w._card(rect, BG, border=PURPLE if self.focus == name else LINE)
-        w._text(("field-value", name), self.values[name] or "—", x + 10, y + 39, 19,
-                PURPLE if self.focus == name and self.select_all else TEXT, max_width=rect[2] - 20)
+        self._draw_edit(name, x + 10, y + 39, 19, rect[2] - 20, placeholder="—")
         if step:
             self._button((name, "minus"), "−", (x + width - 102, y + 29, 36, 42),
                          lambda: self._step(name, -1), enabled=not self.calibrating)
@@ -324,16 +568,17 @@ class SettingsPage:
         rect = (48, 184, 1012, 42)
         self._field_rects["music_path"] = rect
         w._card(rect, BG, border=PURPLE if self.focus == "music_path" else LINE)
-        w._text("music-path", self.values["music_path"] or "输入文件路径", 60, 195, 17,
-                PURPLE if self.focus == "music_path" and self.select_all else TEXT, max_width=986)
+        self._draw_edit("music_path", 60, 195, 17, 986, placeholder="输入文件路径", key="music-path")
         self._button("music-select", "选择音乐", (1080, 184, 152, 42), self.choose_music)
         w._text("music-hint", "列表读取 music/ 目录；也可直接输入完整路径。音乐按原速播放，BPM 用于拍点与判定。",
                 48, 240, 15, MUTED)
         self._field("bpm", 48, 292, 532)
         self._field("beats_per_bar", 654, 292, 532)
         self._field("note_values", 48, 401, 1184)
-        w._text("rhythm-help", "16 为十六分音符，8. 为附点八分音符；用 | 分隔不同小节，每小节总时值须填满。",
+        w._text("rhythm-help", "16 十六分，8. 附点八分；r4/r8/r16 为四分/八分/十六分休止（0=r4）；| 分小节。",
                 48, 486, 15, MUTED)
+        w._text("rhythm-rest-help", "休止拍内不要敲：空过绿勾，敲了红叉；每小节总时值须填满。",
+                48, 510, 15, MUTED)
         self._field("beat_start_seconds", 48, 532, 532)
         self._field("beat_offset_ms", 654, 532, 532)
         self._button("triple-example", "三拍示例", (48, 626, 124, 40), lambda: self.use_pattern_example(3))
@@ -342,10 +587,9 @@ class SettingsPage:
 
     def use_pattern_example(self, beats):
         self.values["beats_per_bar"] = str(beats)
-        self.values["note_values"] = ("8,16,16,8.,16,4 | 16,16,8,16,8.,4" if beats == 3
-                                     else "8,16,16,8.,16,16,16,8,4 | 16,16,8,16,8.,8,16,16,4")
-        self.focus = "note_values"
-        self.select_all = True
+        self.values["note_values"] = ("8,16,16,8.,r16,4 | 16,16,8,16,8.,4" if beats == 3
+                                     else "8,16,16,8.,16,r16,16,8,4 | 16,16,8,16,8.,8,16,16,4")
+        self._focus("note_values", select_all=True)
         self._message("已填入节奏示例，可继续修改；保存后生效。")
 
     def _draw_game(self):
@@ -355,6 +599,7 @@ class SettingsPage:
         w._text("game-errors-help", "出错的四分拍累计到上限即输掉；同一拍内最多计 1 次错误，0 表示不设上限。", 48, 282, 18)
         w._text("game-errors-dedupe", "漏拍、多拍和错拍共享每拍额度；音符漏拍明细仍保留，预备小节不计输赢。", 48, 322, 16, MUTED)
         w._text("game-start-help", "拍手启动 → 等归属小节结束 → 一个完整小节逐拍预备、倒计时 → 正式游戏", 48, 390, 18)
+        w._text("game-bars-auto", "正式游戏长度填 0：自动用满剩余音乐中的完整小节。", 48, 462, 15, MUTED)
         w._text("game-last-beat-help", "最后一拍的启动归入下一小节；三拍子的第 3 拍、四拍子的第 4 拍同样处理。", 48, 432, 16, MUTED)
         w._text("game-retry-help", "成功或输掉都只结束本次互动，音乐继续；再次拍手可重新开始。", 48, 486, 18)
 
@@ -364,12 +609,22 @@ class SettingsPage:
             self._field(name, 48 + (index % 2) * 606, 170 + (index // 2) * 112, 532)
         w._text("audio-help", "输入补偿：正值从拍掌时间扣除；判定容差：目标前后的允许误差；缓冲 0 表示自动。",
                 48, 540, 15, MUTED)
-        glove = self.app.glove
-        if glove is not None:
-            statuses = {"ready": "手套已就绪", "connecting": "手套连接中", "waiting_release": "请松开手套",
-                        "disconnected": "手套未连接", "error": "手套连接失败", "delayed": "手套信号延迟"}
-            w._text("settings-glove", statuses.get(glove.status, "手套未连接"), 48, 600, 17, MUTED)
-            self._button("glove-reconnect", "重连", (240, 588, 86, 42), self.app.reconnect_glove)
+        latency = self.app.engine.latency_ms
+        warning = latency > 30
+        latency_text = (f"当前输出延迟 {latency:.1f} ms"
+                        + (" · 蓝牙通常较大，建议改用内置扬声器或有线耳机" if warning else " · 低延迟"))
+        w._text("audio-latency", latency_text, 48, 568, 14,
+                RED if warning else GREEN, max_width=1184)
+        source = self.app.clap_input
+        if source is not None:
+            statuses = {"starting": "拍掌输入启动中", "waiting": "等待 Joy-Con 脚本连接",
+                        "connected": "Joy-Con 脚本已连接",
+                        "error": "拍掌输入监听失败", "stopped": "拍掌输入已关闭"}
+            w._text("settings-input", statuses.get(source.status, "拍掌输入未连接"), 48, 600, 17, MUTED)
+            self._button("input-restart", "重启监听", (240, 588, 110, 42), self.app.reconnect_input)
+        else:
+            w._text("settings-input", "外部拍掌输入已关闭（config.toml 的 [input] enabled=false）",
+                    48, 600, 16, MUTED)
 
     def _draw_calibration(self):
         w = self.window

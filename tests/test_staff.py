@@ -1,4 +1,4 @@
-"""五线谱布局和视口的软件检查，不依赖窗口、音频或真实手套。"""
+"""五线谱布局和视口的软件检查，不依赖窗口、音频或真实 Joy-Con。"""
 
 from dataclasses import replace
 from fractions import Fraction

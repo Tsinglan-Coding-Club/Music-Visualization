@@ -7,6 +7,20 @@ from time import perf_counter
 
 
 @dataclass(frozen=True)
+class ContactTransition:
+    """一次“接触边沿”。
+
+    输入源可能同时产生按下和松开；Joy-Con 脚本只产生 contacting=True 的按下沿。
+    onset_time 必须是 perf_counter 时钟，主程序用它反推按下瞬间的音乐位置。
+    """
+
+    contacting: bool
+    onset_time: float
+    confirmed_time: float
+    device_ms: int | None
+
+
+@dataclass(frozen=True)
 class RoutedInput:
     epoch: int
     mode: str | None
@@ -17,6 +31,7 @@ class RoutedInput:
     music_time: float | None
     accepted: bool
     reason: str
+    source: str | None = None
 
 
 @dataclass(frozen=True)
@@ -36,12 +51,13 @@ class InputBridge:
         self._pending = deque(maxlen=2048)
         self.dropped = 0
 
-    def activate(self, engine, generation, mode, tail_seconds, max_age_seconds):
+    def activate(self, engine, generation, mode, tail_seconds, max_age_seconds, source="joycon"):
         if mode not in ("game", "calibration"):
             raise ValueError("未知输入模式")
         with self._lock:
             self._epoch += 1
-            self._route = (engine, generation, mode, perf_counter(), tail_seconds, max_age_seconds)
+            self._route = (engine, generation, mode, perf_counter(), tail_seconds,
+                           max_age_seconds, source)
 
     def deactivate(self):
         with self._lock:
@@ -81,11 +97,11 @@ class InputBridge:
     def receive(self, transition):
         with self._lock:
             route = self._route
-            mode, position, accepted, reason = None, None, False, "inactive"
+            mode, position, accepted, reason, source = None, None, False, "inactive", None
             if not transition.contacting:
                 reason = "release"
             elif route is not None:
-                engine, generation, mode, started_at, tail_seconds, max_age = route
+                engine, generation, mode, started_at, tail_seconds, max_age, source = route
                 if transition.onset_time < started_at:
                     reason = "before_activation"
                 elif perf_counter() - transition.onset_time > max_age:
@@ -100,7 +116,8 @@ class InputBridge:
                     else:
                         reason = "playback_changed"
             event = RoutedInput(self._epoch, mode, transition.contacting, transition.onset_time,
-                                transition.confirmed_time, transition.device_ms, position, accepted, reason)
+                                transition.confirmed_time, transition.device_ms, position, accepted,
+                                reason, source)
             self._append(("transition", event))
 
     def drain(self):

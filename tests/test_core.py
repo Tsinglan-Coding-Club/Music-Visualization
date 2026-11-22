@@ -1,4 +1,4 @@
-"""确定时间输入的软件测试；不代表手套或音频硬件延迟测试。"""
+"""确定时间输入的软件测试；不代表 Joy-Con 或音频硬件延迟测试。"""
 
 from dataclasses import FrozenInstanceError
 from fractions import Fraction
@@ -766,6 +766,57 @@ class SessionTests(unittest.TestCase):
         self.assertIsNone(game.start_rejection)
         self.assertFalse(game.finished)
 
+    def test_all_rest_chart_accepts_silence_and_flags_extra_input(self):
+        score = RhythmChart(90, 4, 4, 0, ["r1"], 20, patterns=[["r1"]])
+        game = RhythmSession(score, 100, game_bars=1)
+        self.assertEqual(game.arm(4), 4)
+        self.assertEqual(game.judge(5).status, "rest_miss")
+        self.assertEqual(game.rest_states[game.formal_rests[0].index], "miss")
+        self.assertEqual(game.mistakes, 1)
+
+        game = RhythmSession(score, 100, game_bars=1)
+        self.assertEqual(game.arm(4), 4)
+        game.advance(game.round_end_time)
+        self.assertEqual(game.rest_states[game.formal_rests[0].index], "hit")
+        self.assertTrue(game.finished)
+
+    def test_rest_is_successful_when_silent_and_fails_when_struck(self):
+        score = RhythmChart(90, 4, 4, 0, [4, "r4", 4, 4], 20,
+                            patterns=[[4, "r4", 4, 4]])
+        game = RhythmSession(score, 125, game_bars=1)
+        self.assertEqual(game.arm(4), 4)
+        rest = game.formal_rests[0]
+        game.advance(rest.time + float(rest.duration_beats) * score.beat_seconds + .01)
+        self.assertEqual(game.rest_states[rest.index], "hit")
+        self.assertEqual(game.rest_hits, 1)
+
+        game = RhythmSession(score, 125, game_bars=1)
+        self.assertEqual(game.arm(4), 4)
+        rest = game.formal_rests[0]
+        game.judge(rest.time + .1)
+        self.assertEqual(game.rest_states[rest.index], "miss")
+        game.advance(rest.time + float(rest.duration_beats) * score.beat_seconds + .01)
+        self.assertEqual(game.rest_states[rest.index], "miss")
+        self.assertEqual(game.rest_misses, 1)
+
+    def test_game_bars_zero_uses_all_complete_remaining_bars(self):
+        game = self.session(game_bars=0)
+        self.assertTrue(game.try_start(4.25))
+        self.assertEqual(game.round_game_bars, 4)
+        self.assertAlmostEqual(game.round_end_time, 20.0)
+        self.assertEqual([target.bar for target in game.formal_targets][-1], 4)
+
+    def test_game_bars_zero_needs_at_least_one_complete_bar(self):
+        game = RhythmSession(chart(duration_seconds=10.5), 125, game_bars=0)
+        self.assertFalse(game.try_start(4.25))
+        self.assertEqual(game.start_rejection, "insufficient_music")
+
+    def test_arm_with_game_bars_zero_uses_available_bars(self):
+        game = self.session(game_bars=0)
+        self.assertEqual(game.arm(4), 4)
+        self.assertEqual(game.round_game_bars, 6)
+        self.assertAlmostEqual(game.round_end_time, 20.0)
+
     def test_invalid_session_parameters_and_times(self):
         for field in ["window_ms", "input_offset_ms"]:
             for value in [math.nan, math.inf, -math.inf, True, "10"]:
@@ -777,8 +828,6 @@ class SessionTests(unittest.TestCase):
             for value in [-1, 1.5, True, "1", math.inf, math.nan]:
                 with self.subTest(field=field, value=value), self.assertRaises(ValueError):
                     self.session(**{field: value})
-        with self.assertRaises(ValueError):
-            self.session(game_bars=0)
         game = self.session()
         for value in [math.nan, math.inf, -math.inf]:
             for method in [game.arm, game.try_start, game.judge, game.advance, game.phase_at]:

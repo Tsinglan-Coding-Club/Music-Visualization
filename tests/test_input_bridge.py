@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from rhythm_game.audio import ClockReading
-from rhythm_game.glove import ContactTransition
+from rhythm_game.input_bridge import ContactTransition
 from rhythm_game.input_bridge import InputBridge
 
 
@@ -55,7 +55,7 @@ class InputBridgeTests(unittest.TestCase):
         self.assertFalse(self.bridge.is_current(event))
         self.assertEqual(self.engine.claps, 1)
 
-    def test_replaced_serial_source_cannot_play_against_new_route(self):
+    def test_replaced_input_source_cannot_play_against_new_route(self):
         old_receive, old_record = self.bridge.source_callbacks()
         self.activate()
         new_receive, _ = self.bridge.source_callbacks()

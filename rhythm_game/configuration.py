@@ -9,7 +9,7 @@ import re
 import tempfile
 import tomllib
 
-from .notation import normalize_pattern, parse_note
+from .notation import normalize_pattern, parse_event
 
 
 @dataclass(frozen=True)
@@ -32,10 +32,9 @@ class Config:
     width: int
     height: int
     lookahead_seconds: float
-    glove_enabled: bool = False
-    glove_port: str = ""
-    glove_baudrate: int = 115200
-    glove_debounce_ms: float = 30.0
+    input_enabled: bool = False
+    input_socket_path: str = "tmp/joycon-clap.sock"
+    input_max_age_ms: float = 250.0
     patterns: tuple[tuple[int | str, ...], ...] = ()
     game_bars: int = 4
     max_mistakes: int = 3
@@ -55,8 +54,10 @@ def parse_config_text(text: str, source: str | Path) -> Config:
         "judgment": {"window_ms", "input_offset_ms", "max_mistakes"},
         "audio": {"device", "blocksize", "clap_path", "clap_volume"},
         "display": {"width", "height", "lookahead_seconds"},
-        "glove": {"enabled", "port", "baudrate", "debounce_ms"},
+        "input": {"enabled", "socket_path", "max_age_ms"},
     }
+    if "glove" in data:
+        raise ValueError("手套串口输入已移除；请删除 [glove]，改用 [input] 的 Joy-Con 脚本")
     for section, values in data.items():
         if section not in allowed or not isinstance(values, dict):
             raise ValueError(f"未知配置区段：{section}")
@@ -64,12 +65,12 @@ def parse_config_text(text: str, source: str | Path) -> Config:
         if unknown:
             raise ValueError(f"{section} 中有未知配置：{', '.join(sorted(unknown))}")
     for section in allowed:
-        if section not in data and section != "glove":
+        if section not in data and section != "input":
             raise ValueError(f"配置缺少 [{section}]")
-    data["glove"] = {"enabled": False, "port": "", "baudrate": 115200, "debounce_ms": 30.0,
-                     **data.get("glove", {})}
-    if not isinstance(data["glove"]["enabled"], bool):
-        raise ValueError("glove.enabled 必须是布尔值")
+    data["input"] = {"enabled": False, "socket_path": "tmp/joycon-clap.sock",
+                     "max_age_ms": 250.0, **data.get("input", {})}
+    if not isinstance(data["input"]["enabled"], bool):
+        raise ValueError("input.enabled 必须是布尔值")
 
     data["rhythm"].setdefault("game_bars", 4)
     data["rhythm"].setdefault("lead_in_bars", 1)
@@ -121,6 +122,9 @@ def parse_config_text(text: str, source: str | Path) -> Config:
     if beat_start + beat_offset / 1000 < 0:
         raise ValueError("拍点起始时间加整曲偏移后不能小于 0")
     window = number("judgment", "window_ms", 1, 1000)
+    socket_path = text("input", "socket_path").strip()
+    if not socket_path:
+        raise ValueError("input.socket_path 不能为空")
     return Config(
         source, music_path, number("music", "volume", 0, 1), bpm,
         beat_start, beat_offset, beats_per_bar,
@@ -132,10 +136,9 @@ def parse_config_text(text: str, source: str | Path) -> Config:
         number("display", "width", 1000, 3840, integer=True),
         number("display", "height", 700, 2160, integer=True),
         number("display", "lookahead_seconds", 0.5, 10),
-        data["glove"]["enabled"], text("glove", "port").strip(),
-        number("glove", "baudrate", 1, 3000000, integer=True),
-        number("glove", "debounce_ms", 0, 1000),
-        patterns, number("rhythm", "game_bars", 1, 128, integer=True),
+        data["input"]["enabled"], socket_path,
+        number("input", "max_age_ms", 1, 5000),
+        patterns, number("rhythm", "game_bars", 0, 128, integer=True),
         number("judgment", "max_mistakes", 0, 999, integer=True),
     )
 
@@ -226,7 +229,7 @@ def prepare_config_update(path, updates, expected_text):
             for pattern in patterns:
                 if not isinstance(pattern, (list, tuple)) or not pattern:
                     raise ValueError(f"{name} 中每个小节必须是非空音符数组")
-                normalized.append(tuple(parse_note(note).token for note in pattern))
+                normalized.append(tuple(parse_event(note).token for note in pattern))
             serialized = json.dumps(normalized[0] if name == "note_values" else normalized,
                                     ensure_ascii=False)
         else:

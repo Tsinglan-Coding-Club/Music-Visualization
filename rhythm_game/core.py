@@ -7,7 +7,7 @@ import math
 from numbers import Real
 from typing import Sequence
 
-from .notation import normalize_pattern, parse_note
+from .notation import RhythmNote, RhythmRest, normalize_pattern, parse_event
 
 
 # 仅吸收浮点运算误差，不构成额外的玩法容差。
@@ -41,6 +41,19 @@ def _nonnegative_integer(name: str, value: int) -> int:
 @dataclass(frozen=True)
 class Target:
     """目标起音；index 从 0 开始，bar 从 1 开始。"""
+
+    index: int
+    time: float
+    denominator: int
+    bar: int
+    dots: int = 0
+    beat_offset: Fraction = Fraction(0)
+    duration_beats: Fraction | None = None
+
+
+@dataclass(frozen=True)
+class Rest:
+    """休止符在谱面中的位置；不参与判定，只用于画面和总时值。"""
 
     index: int
     time: float
@@ -110,6 +123,7 @@ class RhythmChart:
             bar_extent = nearest_extent
         bar_count = math.ceil(bar_extent)
         self.targets: list[Target] = []
+        self.rests: list[Rest] = []
         self._bar_ranges: dict[int, tuple[int, int]] = {}
         downbeats = []
         for bar_index in range(bar_count):
@@ -120,13 +134,18 @@ class RhythmChart:
             first_index = len(self.targets)
             beat_offset = Fraction(0)
             for token in self.patterns[bar_index % len(self.patterns)]:
-                note = parse_note(token)
+                event = parse_event(token)
                 time = self.start + float(bar_index * self.beats_per_bar + beat_offset) * self.beat_seconds
                 if time < self.duration_seconds:
-                    self.targets.append(Target(len(self.targets), time, note.denominator,
-                                               bar_index + 1, note.dots, beat_offset, note.beats))
-                beat_offset += note.beats
+                    if isinstance(event, RhythmNote):
+                        self.targets.append(Target(len(self.targets), time, event.denominator,
+                                                   bar_index + 1, event.dots, beat_offset, event.beats))
+                    else:
+                        self.rests.append(Rest(len(self.rests), time, event.denominator,
+                                               bar_index + 1, event.dots, beat_offset, event.beats))
+                beat_offset += event.beats
             self._bar_ranges[bar_index + 1] = (first_index, len(self.targets))
+        self.rests = tuple(self.rests)
         self._times = tuple(target.time for target in self.targets)
         self._downbeat_times = tuple(downbeats)
 
@@ -135,6 +154,10 @@ class RhythmChart:
         _positive_integer("bar", bar)
         first, last = self._bar_ranges.get(bar, (0, 0))
         return self.targets[first:last]
+
+    def rests_for_bar(self, bar: int) -> list[Rest]:
+        _positive_integer("bar", bar)
+        return [rest for rest in self.rests if rest.bar == bar]
 
     def next_bar(self, time: float) -> float | None:
         """返回不早于 time 的下一小节第一拍；音频结束后返回 None。"""
@@ -173,9 +196,10 @@ class RhythmChart:
 class RhythmSession:
     """拍掌归属小节结束后，练习完整一小节，再正式游玩 game_bars 小节。
 
-    最后一个四分拍的拍掌归属下一小节，其余拍掌归属当前小节。准备拍只供
-    练习，不影响正式成绩。arm 是跳过等待与准备期的显式测试接口。
-    正 input_offset_ms 从输入时间扣除；advance 保留正偏移的输入处理余量。
+    game_bars 为 0 时自动使用剩余音乐中能完整容纳的小节。最后一个四分拍的
+    拍掌归属下一小节，其余拍掌归属当前小节。准备拍只供练习，不影响正式成绩。
+    arm 是跳过等待与准备期的显式测试接口。正 input_offset_ms 从输入时间扣除；
+    advance 保留正偏移的输入处理余量。
     """
 
     def __init__(self, chart: RhythmChart, window_ms: float, input_offset_ms: float = 0,
@@ -187,7 +211,8 @@ class RhythmSession:
             raise ValueError("window_ms 必须非负")
         # 旧配置仍可读取；实际启动始终使用一个完整准备小节。
         self.lead_in_bars = _nonnegative_integer("lead_in_bars", lead_in_bars)
-        self.game_bars = _positive_integer("game_bars", game_bars)
+        # 0 表示自动用满剩余音乐中的完整小节。
+        self.game_bars = _nonnegative_integer("game_bars", game_bars)
         self.max_mistakes = _nonnegative_integer("max_mistakes", max_mistakes)
         self._window = self.window_ms / 1000
         self._offset = self.input_offset_ms / 1000
@@ -199,14 +224,17 @@ class RhythmSession:
         self.trigger_time: float | None = None
         self.preparation_start_time: float | None = None
         self.round_end_time: float | None = None
+        self.round_game_bars: int | None = None
         self.attributed_bar: int | None = None
         self.score_chart: RhythmChart | None = None
         self.states: dict[int, str] = {}
+        self.rest_states: dict[int, str] = {}
         self.preparation_states: dict[int, str] = {}
         self.preparation_targets: tuple[Target, ...] = ()
         self._preparation_times: tuple[float, ...] = ()
         self._entry_index = self._end_index = 0
         self._miss_cursor = self._entry_index
+        self._rest_cursor = 0
         self._prep_cursor = 0
         self._armed_at: float | None = None
         self._last_input: float | None = None
@@ -221,10 +249,14 @@ class RhythmSession:
         self._completed = False
 
     def _enter(self, entry_bar: int, armed_at: float, *, trigger_time: float | None = None,
-               attributed_bar: int | None = None, preparation_start: float | None = None) -> None:
+               attributed_bar: int | None = None, preparation_start: float | None = None,
+               game_bars: int | None = None) -> None:
         self.reset()
+        effective_bars = self.game_bars if game_bars is None else game_bars
+        effective_bars = max(1, effective_bars)
+        self.round_game_bars = effective_bars
         self.entry_time = self.chart._downbeat_times[entry_bar - 1]
-        self.round_end_time = min(self.entry_time + self.game_bars * self.chart.bar_seconds,
+        self.round_end_time = min(self.entry_time + effective_bars * self.chart.bar_seconds,
                                   self.chart.duration_seconds)
         # 音乐只提供绝对拍钟；每轮正式谱从第一个模板重新开始。
         self.score_chart = RhythmChart(
@@ -273,12 +305,22 @@ class RhythmSession:
             attributed_bar = bar + (beat >= self.chart.beats_per_bar - _EPSILON)
         preparation_start = self.chart.start + attributed_bar * self.chart.bar_seconds
         entry = preparation_start + self.chart.bar_seconds
-        end = entry + self.game_bars * self.chart.bar_seconds
-        if end > self.chart.duration_seconds + _EPSILON:
-            self.start_rejection = "insufficient_music"
-            return False
+        if self.game_bars:
+            game_bars = self.game_bars
+            end = entry + game_bars * self.chart.bar_seconds
+            if end > self.chart.duration_seconds + _EPSILON:
+                self.start_rejection = "insufficient_music"
+                return False
+        else:
+            # 0 = 自动：只使用剩余音乐中能完整容纳的小节，忽略尾部不足一小节的部分。
+            game_bars = math.floor(
+                (self.chart.duration_seconds - entry + _EPSILON) / self.chart.bar_seconds)
+            if game_bars < 1:
+                self.start_rejection = "insufficient_music"
+                return False
         self._enter(attributed_bar + 2, music_time, trigger_time=corrected,
-                    attributed_bar=attributed_bar, preparation_start=preparation_start)
+                    attributed_bar=attributed_bar, preparation_start=preparation_start,
+                    game_bars=game_bars)
         return True
 
     def arm(self, time: float) -> float | None:
@@ -288,7 +330,14 @@ class RhythmSession:
         entry_time = self.chart.next_bar(time)
         if entry_time is not None:
             entry_bar = round((entry_time - self.chart.start) / self.chart.bar_seconds) + 1
-            self._enter(entry_bar, time)
+            if self.game_bars:
+                game_bars = self.game_bars
+            else:
+                game_bars = math.floor(
+                    (self.chart.duration_seconds - entry_time + _EPSILON) / self.chart.bar_seconds)
+                if game_bars < 1:
+                    return None
+            self._enter(entry_bar, time, game_bars=game_bars)
         return self.entry_time
 
     @property
@@ -313,6 +362,18 @@ class RhythmSession:
     @property
     def misses(self) -> int:
         return self._misses
+
+    @property
+    def formal_rests(self) -> tuple[Rest, ...]:
+        return tuple(self.score_chart.rests) if self.score_chart is not None else ()
+
+    @property
+    def rest_hits(self) -> int:
+        return sum(state == "hit" for state in self.rest_states.values())
+
+    @property
+    def rest_misses(self) -> int:
+        return sum(state == "miss" for state in self.rest_states.values())
 
     @property
     def mistakes(self) -> int:
@@ -385,6 +446,15 @@ class RhythmSession:
             self.failure_time = music_time
 
     def judge(self, music_time: float) -> Judgment:
+        """正式输入判定；落在休止符内的错误输入会把该休止标记为 miss。"""
+        result = self._judge_formal(music_time)
+        if result.status in ("early", "late", "duplicate"):
+            rest = self._rest_at(music_time - self._offset)
+            if rest is not None:
+                self.rest_states[rest.index] = "miss"
+        return result
+
+    def _judge_formal(self, music_time: float) -> Judgment:
         """匹配最近起音，等距选较早目标；触发输入与准备练习不计正式成绩。"""
         music_time = _finite("music_time", music_time)
         if self.entry_time is None or music_time < self._armed_at:
@@ -419,6 +489,13 @@ class RhythmSession:
         self._settle_formal(corrected - self._window, self._offset)
         if self.failed:
             return Judgment("failed", None, None)
+        if not self.score_chart.targets:
+            rest = self._rest_at(corrected)
+            if rest is not None:
+                self.rest_states[rest.index] = "miss"
+                self._mistake("rest", music_time, beat_time=rest.time)
+                return Judgment("rest_miss", None, None)
+            return Judgment("waiting", None, None)
         target = self._nearest(self.score_chart.targets, self.score_chart._times, corrected,
                                self._entry_index, self._end_index)
         error = corrected - target.time
@@ -441,6 +518,27 @@ class RhythmSession:
         self.states[target.index] = "hit"
         self._hits += 1
         return Judgment("hit", target, error * 1000)
+
+    def _rest_at(self, time: float) -> Rest | None:
+        if self.score_chart is None:
+            return None
+        for rest in self.score_chart.rests:
+            end = rest.time + float(rest.duration_beats or 1) * self.chart.beat_seconds
+            if rest.time - _EPSILON <= time < end - _EPSILON:
+                return rest
+        return None
+
+    def _settle_rests(self, before: float) -> None:
+        if self.score_chart is None:
+            return
+        rests = self.score_chart.rests
+        while self._rest_cursor < len(rests):
+            rest = rests[self._rest_cursor]
+            end = rest.time + float(rest.duration_beats or 1) * self.chart.beat_seconds
+            if before < end - _EPSILON:
+                break
+            self.rest_states.setdefault(rest.index, "hit")
+            self._rest_cursor += 1
 
     def _settle_formal(self, before: float, failure_offset: float) -> None:
         while self._miss_cursor < self._end_index:
@@ -470,8 +568,14 @@ class RhythmSession:
             self.preparation_states.setdefault(target.index, "miss")
             self._prep_cursor += 1
         self._settle_formal(music_time - allowance, max(self._offset, 0))
+        self._settle_rests(music_time - max(self._offset, 0))
         if self.failed:
             return
         if (music_time >= self.round_end_time + max(self._offset, 0) - _EPSILON
                 and len(self.states) == self._end_index - self._entry_index):
+            # 固定小节数被音频末尾截短时，最后一个休止可能没有完整结束；
+            # 本轮正式部分结束时仍把已进入的休止结算为正确（miss 不会被覆盖）。
+            for rest in self.score_chart.rests:
+                if rest.time < self.round_end_time - _EPSILON:
+                    self.rest_states.setdefault(rest.index, "hit")
             self._completed = True

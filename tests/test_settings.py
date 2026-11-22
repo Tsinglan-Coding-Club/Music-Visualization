@@ -6,6 +6,8 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
+import arcade
+
 from rhythm_game.app import RhythmApp
 from rhythm_game.settings import SettingsPage
 from rhythm_game.input_bridge import JudgmentInput
@@ -21,7 +23,7 @@ class SettingsTests(unittest.TestCase):
         (self.root / "music.wav").write_bytes(b"fixture")
         self.path = write_config(self.root)
         self.original = self.path.read_text()
-        self.app = RhythmApp(self.path, enable_glove=False)
+        self.app = RhythmApp(self.path, enable_input=False)
         self.addCleanup(self.app.close)
         self.closed = False
         self.window = SimpleNamespace(controller=self.app, close_settings=self.close_settings)
@@ -105,7 +107,7 @@ class SettingsTests(unittest.TestCase):
         self.page.start_calibration()
         for i in range(7):
             self.page.calibrator.add(2 + i * .5)
-        self.app._pending_inputs.append(JudgmentInput(20, 5.5, "glove", "calibration"))
+        self.app._pending_inputs.append(JudgmentInput(20, 5.5, "joycon", "calibration"))
         self.page.finish_calibration()
         self.assertEqual(self.page.calibrator.estimate().count, 8)
         self.assertTrue(self.page.calibrator.estimate().ready)
@@ -114,7 +116,7 @@ class SettingsTests(unittest.TestCase):
     def test_accepted_settled_sample_is_kept_during_audio_eof_tail(self):
         self.page.start_calibration()
         self.app.engine.pause()  # 音频已到末尾，窗口仍在结算先前接受的输入。
-        self.page.tap(10, 15.98, play_sound=False, source="glove", settled=True)
+        self.page.tap(10, 15.98, play_sound=False, source="joycon", settled=True)
         self.assertEqual(self.page.calibrator.estimate().count, 1)
         self.page.tap(11, 15.99, play_sound=False, source="keyboard", settled=False)
         self.assertEqual(self.page.calibrator.estimate().count, 1)
@@ -155,6 +157,47 @@ class SettingsTests(unittest.TestCase):
         self.page.focus, self.page.select_all = "note_values", True
         self.page.text("4，8，8，4，4")
         self.assertEqual(self.page.updates()["note_values"], [4, 8, 8, 4, 4])
+
+    def test_textbox_keyboard_copy_paste_and_select_all(self):
+        page = self.page
+        page._focus("note_values", select_all=True)
+        with patch("rhythm_game.settings._clipboard_get", return_value="4, r4, 4, r4"):
+            page.key_press(arcade.key.V, arcade.key.MOD_COMMAND, 0)
+        self.assertEqual(page.values["note_values"], "4, r4, 4, r4")
+        page.key_press(arcade.key.A, arcade.key.MOD_COMMAND, 0)
+        self.assertTrue(page.select_all)
+        page.key_press(arcade.key.BACKSPACE, 0, 0)
+        self.assertEqual(page.values["note_values"], "")
+
+    def test_saving_rest_pattern_uses_rest_aware_config_update(self):
+        self.page.values["note_values"] = "4, r4, 4, r4"
+        self.page.save()
+        self.assertTrue(self.closed)
+        self.assertEqual(self.app.config.patterns[0], (4, "r4", 4, "r4"))
+        self.assertEqual(self.app.config.note_values, (4, "r4", 4, "r4"))
+
+    def test_textbox_cursor_selection_clipboard_and_rest_tokens(self):
+        page = self.page
+        page.values["note_values"] = "4, 8, 8, 4"
+        page._focus("note_values", cursor=3)
+        page.text("r8, ")
+        self.assertEqual(page.values["note_values"], "4, r8, 8, 8, 4")
+        page._delete_edit(True)
+        self.assertTrue(page.values["note_values"].startswith("4, r8,"))
+
+        page._focus("note_values", select_all=True)
+        page.text("4, r4, 4, r4")
+        self.assertEqual(page.values["note_values"], "4, r4, 4, r4")
+        self.assertEqual(page.updates()["patterns"][0], [4, "r4", 4, "r4"])
+
+        with patch("rhythm_game.settings._clipboard_set") as setter:
+            page._copy()
+            setter.assert_called_once_with("4, r4, 4, r4")
+        page._focus("note_values", select_all=True)
+        with patch("rhythm_game.settings._clipboard_get", return_value="r8, 8, r8, 8, 4, 4"):
+            page._paste()
+        self.assertEqual(page.values["note_values"], "r8, 8, r8, 8, 4, 4")
+        self.assertEqual(page.updates()["patterns"][0], ["r8", 8, "r8", 8, 4, 4])
 
     def test_changed_calibration_inputs_discard_previous_estimate(self):
         for name in ("bpm", "beat_start_seconds", "beat_offset_ms", "input_offset_ms", "music_path"):
