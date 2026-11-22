@@ -31,7 +31,7 @@ Joy-Con 需要两个终端：
 .venv/bin/python beatgame.py
 
 # 终端 2：Joy-Con A 键发送器
-.venv/bin/python experiments/joycon_clap_sender.py
+.venv/bin/python joycon_clap_sender.py
 ```
 
 先在系统设置 → 蓝牙配对 Joy-Con（按住侧面 SYNC 键 3 秒，灯快闪后连接）。发送器可以先于游戏启动；游戏没开时它会每秒重试 socket。
