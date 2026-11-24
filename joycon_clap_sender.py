@@ -11,10 +11,10 @@
 因为 host_time 使用两个进程共享的 perf_counter 时钟。
 
 用法：
-    .venv/bin/python experiments/joycon_clap_sender.py
-    .venv/bin/python experiments/joycon_clap_sender.py --list
-    .venv/bin/python experiments/joycon_clap_sender.py --button 1
-    .venv/bin/python experiments/joycon_clap_sender.py --socket /tmp/joycon-clap.sock
+    .venv/bin/python joycon_clap_sender.py
+    .venv/bin/python joycon_clap_sender.py --list
+    .venv/bin/python joycon_clap_sender.py --button 1
+    .venv/bin/python joycon_clap_sender.py --socket /tmp/joycon-clap.sock
 
 先配对 Joy-Con（系统设置 → 蓝牙，按住 SYNC 3 秒），再运行本脚本。
 游戏没启动时脚本会每秒重试连接；游戏启动后自动接上。
@@ -27,7 +27,7 @@ import socket
 import sys
 import time
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
+PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_SOCKET = PROJECT_ROOT / "tmp" / "joycon-clap.sock"
 DEFAULT_BUTTON = 1          # SDL 对 Switch 手柄的映射：0=B, 1=A
 DEFAULT_RELEASE_MS = 40.0
@@ -72,7 +72,9 @@ def clap(host_time, button):
 def run_hardware(device_index, button, release_ms, socket_path, list_only=False):
     import pygame                  # 延迟导入，--help 不需要 SDL
 
-    pygame.init()
+    # 只初始化视频/事件和手柄，不初始化 pygame.mixer：
+    # 发送器不需要音频，mixer 先占用 CoreAudio 可能让 Arcade/sounddevice 打不开输出。
+    pygame.display.init()
     pygame.joystick.init()
     count = pygame.joystick.get_count()
     print(f"检测到 {count} 个手柄设备")

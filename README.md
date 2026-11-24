@@ -36,6 +36,8 @@ Joy-Con 需要两个终端：
 
 先在系统设置 → 蓝牙配对 Joy-Con（按住侧面 SYNC 键 3 秒，灯快闪后连接）。发送器可以先于游戏启动；游戏没开时它会每秒重试 socket。
 
+发送器只初始化 SDL 的视频/手柄子系统，**不初始化 pygame.mixer**；它不需要音频，避免先占用 CoreAudio 导致游戏打不开音频输出。若两个进程仍互相影响，先启动游戏，再启动发送器。
+
 | 操作 | 效果 |
 | --- | --- |
 | Enter | 从头播放音乐，等待玩家拍手；暂停时继续播放 |
@@ -68,7 +70,7 @@ Joy-Con 需要两个终端：
 默认已启用 `[input]`，游戏在 `tmp/joycon-clap.sock` 监听本地 Unix socket。拍掌由独立的 pygame 脚本产生，游戏本身不初始化 pygame，也不打开手柄：
 
 ```sh
-.venv/bin/python experiments/joycon_clap_sender.py --button 1
+.venv/bin/python joycon_clap_sender.py --button 1
 ```
 
 - 发送器读取 Joy-Con 的 A 键（SDL 编号 `1`），只发“松开→按下”的按下沿。
