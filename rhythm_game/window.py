@@ -12,7 +12,8 @@ import arcade
 
 from .app import BG, PANEL, LINE, TEXT
 from .settings import SettingsPage
-from .hotpot_ui import HotpotStage, NIGHT
+from .hotpot_ui import NIGHT
+from .launcher_ui import LauncherStage
 
 
 DESIGN_WIDTH = 1280
@@ -67,7 +68,7 @@ class RhythmWindow(arcade.Window):
                 ((196, 736, 120, 44), "暂停", "toggle_pause", False),
                 ((328, 736, 120, 44), "重置", "reset_round", False),
             ]
-            self.stage = HotpotStage(self)
+            self.stage = LauncherStage(self)
         except Exception:
             self.close()
             raise
